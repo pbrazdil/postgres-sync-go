@@ -1,0 +1,7 @@
+{
+  "subset": {
+    "where": "priority >= 2",
+    "order_by": "priority ASC",
+    "limit": 2
+  }
+}
