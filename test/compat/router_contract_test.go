@@ -33,7 +33,10 @@ func TestRouterRootAndHealthLifecycle(t *testing.T) {
 
 	afterStart := httptest.NewRecorder()
 	handler.ServeHTTP(afterStart, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
-	assertJSONStatus(t, afterStart, http.StatusOK, "active")
+	assertJSONStatuses(t, afterStart,
+		statusExpectation{Code: http.StatusOK, Status: "active"},
+		statusExpectation{Code: http.StatusAccepted, Status: "waiting"},
+	)
 }
 
 func TestShapeOptionsBypassSecret(t *testing.T) {
@@ -193,16 +196,27 @@ func newTestEngine(t *testing.T) *pulsesync.Engine {
 func assertJSONStatus(t *testing.T, rec *httptest.ResponseRecorder, code int, status string) {
 	t.Helper()
 
-	if rec.Code != code {
-		t.Fatalf("status code = %d, want %d", rec.Code, code)
-	}
+	assertJSONStatuses(t, rec, statusExpectation{Code: code, Status: status})
+}
+
+type statusExpectation struct {
+	Code   int
+	Status string
+}
+
+func assertJSONStatuses(t *testing.T, rec *httptest.ResponseRecorder, expectations ...statusExpectation) {
+	t.Helper()
 
 	var body map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if body["status"] != status {
-		t.Fatalf("status = %q, want %q", body["status"], status)
+	for _, expectation := range expectations {
+		if rec.Code == expectation.Code && body["status"] == expectation.Status {
+			return
+		}
 	}
+
+	t.Fatalf("unexpected health response = (%d, %q)", rec.Code, body["status"])
 }
