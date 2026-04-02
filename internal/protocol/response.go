@@ -19,6 +19,7 @@ var electricHeaders = []string{
 	"electric-has-data",
 	"electric-offset",
 	"electric-schema",
+	"electric-snapshot",
 	"electric-up-to-date",
 	"electric-internal-known-error",
 	"retry-after",
@@ -63,6 +64,28 @@ func WriteUnauthorized(w http.ResponseWriter) {
 	})
 }
 
+func WriteOverloaded(w http.ResponseWriter) {
+	WriteError(w, http.StatusServiceUnavailable, map[string]any{
+		"message": "Too many concurrent shape requests",
+	})
+}
+
+func WriteOverloadedWithRequest(w http.ResponseWriter, req ShapeRequest, limits config.MaxConcurrentRequests) {
+	kind := "existing"
+	limit := limits.Existing
+	if req.Offset == "-1" || req.Offset == "now" || req.Handle == "" {
+		kind = "initial"
+		limit = limits.Initial
+	}
+
+	w.Header().Set("Retry-After", "10")
+	w.Header().Set("electric-internal-known-error", "true")
+	WriteError(w, http.StatusServiceUnavailable, map[string]any{
+		"code":    "concurrent_request_limit_exceeded",
+		"message": fmt.Sprintf("Concurrent %s request limit exceeded (limit: %d), please retry", kind, limit),
+	})
+}
+
 func WriteShapeShellUnavailable(w http.ResponseWriter) {
 	WriteError(w, http.StatusServiceUnavailable, map[string]any{
 		"message": "PulseSync protocol shell is active, but shape serving is not implemented yet",
@@ -79,9 +102,16 @@ type SuccessHeaderOptions struct {
 var cursorEpoch = time.Date(2024, time.October, 9, 0, 0, 0, 0, time.UTC)
 
 func WriteSuccessHeaders(w http.ResponseWriter, cfg config.Config, req ShapeRequest, state shapes.State, opts SuccessHeaderOptions) {
+	offset := state.CurrentOffset
+	hasData := fmt.Sprintf("%t", opts.HasData)
+	if req.LiveSSE {
+		offset = shapes.NowOffset
+		hasData = "true"
+	}
+
 	w.Header().Set("electric-handle", state.Handle)
-	w.Header().Set("electric-offset", state.CurrentOffset)
-	w.Header().Set("electric-has-data", fmt.Sprintf("%t", opts.HasData))
+	w.Header().Set("electric-offset", offset)
+	w.Header().Set("electric-has-data", hasData)
 	if opts.UpToDate {
 		w.Header().Set("electric-up-to-date", "")
 	} else {
@@ -128,11 +158,11 @@ func WriteSubsetHeaders(w http.ResponseWriter, state shapes.State, schema map[st
 
 func WriteMustRefetchHeaders(w http.ResponseWriter, req ShapeRequest, state shapes.State) {
 	w.Header().Set("electric-handle", state.Handle)
-	w.Header().Set("electric-offset", state.CurrentOffset)
 	w.Header().Set("etag", fmt.Sprintf("%q", ETag(state.Handle, req.Offset, state.CurrentOffset, false)))
 	w.Header().Set("cache-control", mustRefetchCacheControlValue(state.Handle))
 	w.Header().Del("electric-cursor")
 	w.Header().Del("electric-has-data")
+	w.Header().Del("electric-offset")
 	w.Header().Del("electric-schema")
 	w.Header().Del("electric-up-to-date")
 }
