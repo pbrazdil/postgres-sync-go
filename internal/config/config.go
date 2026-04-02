@@ -142,6 +142,9 @@ func (c Config) Validate() error {
 	if c.Storage.Mode == "" {
 		c.Storage.Mode = StorageModeMemory
 	}
+	if c.Storage.Mode != StorageModeMemory && c.Storage.Mode != StorageModeDisk {
+		return fmt.Errorf("invalid storage mode: %s", c.Storage.Mode)
+	}
 
 	return nil
 }
@@ -226,6 +229,38 @@ func (l Loader) Load() (Config, error) {
 		if err := json.Unmarshal([]byte(value), &cfg.MaxConcurrentRequests); err != nil {
 			return Config{}, fmt.Errorf("invalid ELECTRIC_MAX_CONCURRENT_REQUESTS: %w", err)
 		}
+	}
+
+	if value, ok := lookup("ELECTRIC_STORAGE_MODE"); ok && strings.TrimSpace(value) != "" {
+		cfg.Storage.Mode = StorageMode(strings.TrimSpace(value))
+	}
+
+	if value, ok := lookup("ELECTRIC_STORAGE_DIR"); ok {
+		cfg.Storage.Dir = strings.TrimSpace(value)
+	}
+
+	if value, ok := lookup("ELECTRIC_LONG_POLL_TIMEOUT_MS"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid ELECTRIC_LONG_POLL_TIMEOUT_MS: %w", err)
+		}
+		cfg.LongPollTimeoutMS = parsed
+	}
+
+	if value, ok := lookup("ELECTRIC_SSE_TIMEOUT_MS"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid ELECTRIC_SSE_TIMEOUT_MS: %w", err)
+		}
+		cfg.SSETimeoutMS = parsed
+	}
+
+	if value, ok := lookup("ELECTRIC_ALLOW_SHAPE_DELETION"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid ELECTRIC_ALLOW_SHAPE_DELETION: %w", err)
+		}
+		cfg.AllowShapeDeletion = parsed
 	}
 
 	return cfg, cfg.Validate()
