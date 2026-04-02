@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/petrbrazdil/pulsesync/internal/storage"
 )
 
 const replicationStandbyTimeout = 10 * time.Second
@@ -61,24 +63,10 @@ func (r *Runtime) ensureReplication(ctx context.Context) error {
 		return err
 	}
 
-	slotName := r.replicationSlotName()
-	slot, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		conn,
-		slotName,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{Temporary: true},
-	)
+	slotName, startLSN, err := r.prepareReplicationStart(ctx, pool, conn, sysident)
 	if err != nil {
 		_ = conn.Close(context.Background())
 		return err
-	}
-
-	startLSN := sysident.XLogPos
-	if slot.ConsistentPoint != "" {
-		if consistentPoint, parseErr := pglogrepl.ParseLSN(slot.ConsistentPoint); parseErr == nil {
-			startLSN = consistentPoint
-		}
 	}
 
 	if err := pglogrepl.StartReplication(
@@ -87,6 +75,7 @@ func (r *Runtime) ensureReplication(ctx context.Context) error {
 		slotName,
 		startLSN,
 		pglogrepl.StartReplicationOptions{
+			Mode: pglogrepl.LogicalReplication,
 			PluginArgs: []string{
 				"proto_version '1'",
 				fmt.Sprintf("publication_names '%s'", r.publicationName()),
@@ -102,7 +91,9 @@ func (r *Runtime) ensureReplication(ctx context.Context) error {
 	r.mu.Lock()
 	r.replicationConn = conn
 	r.replicationCancel = cancel
+	r.replicationSlot = slotName
 	r.systemIdentity = sysident
+	r.relationCache = map[uint32]relationMetadata{}
 	r.status = StatusActive
 	r.mu.Unlock()
 
@@ -112,7 +103,114 @@ func (r *Runtime) ensureReplication(ctx context.Context) error {
 		r.replicationLoop(replCtx, conn, startLSN)
 	}()
 
+	if err := r.saveRuntimeCheckpoint(context.Background(), slotName, startLSN, sysident); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (r *Runtime) prepareReplicationStart(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	conn *pgconn.PgConn,
+	sysident pglogrepl.IdentifySystemResult,
+) (string, pglogrepl.LSN, error) {
+	slotName := r.replicationSlotName()
+	startLSN := sysident.XLogPos
+
+	checkpoint, hasCheckpoint, err := r.store.LoadRuntimeCheckpoint(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+
+	slotExists, err := r.replicationSlotExists(ctx, pool, slotName)
+	if err != nil {
+		return "", 0, err
+	}
+
+	validCheckpoint := false
+	if r.store.Kind() == "memory" {
+		hasCheckpoint = false
+	}
+
+	if r.store.Kind() == "disk" && hasCheckpoint {
+		validCheckpoint = checkpointCompatible(checkpoint, slotName, sysident, currentDatabaseName(r.cfg.DatabaseURL))
+		if !validCheckpoint {
+			if _, err := r.shapes.InvalidateAll(); err != nil {
+				return "", 0, err
+			}
+		}
+	}
+
+	if r.store.Kind() == "disk" && validCheckpoint && !slotExists {
+		if _, err := r.shapes.InvalidateAll(); err != nil {
+			return "", 0, err
+		}
+		validCheckpoint = false
+	}
+
+	if !slotExists {
+		slot, err := pglogrepl.CreateReplicationSlot(
+			ctx,
+			conn,
+			slotName,
+			"pgoutput",
+			pglogrepl.CreateReplicationSlotOptions{
+				Temporary: r.store.Kind() != "disk",
+				Mode:      pglogrepl.LogicalReplication,
+			},
+		)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			return "", 0, err
+		}
+		if slot.ConsistentPoint != "" {
+			if consistentPoint, parseErr := pglogrepl.ParseLSN(slot.ConsistentPoint); parseErr == nil {
+				startLSN = consistentPoint
+			}
+		}
+	} else if validCheckpoint {
+		parsed, err := pglogrepl.ParseLSN(checkpoint.LastConfirmedLSN)
+		if err == nil {
+			startLSN = parsed
+		}
+	}
+
+	return slotName, startLSN, nil
+}
+
+func checkpointCompatible(checkpoint storage.RuntimeCheckpoint, slotName string, sysident pglogrepl.IdentifySystemResult, dbName string) bool {
+	return checkpoint.SlotName == slotName &&
+		checkpoint.SystemID == sysident.SystemID &&
+		checkpoint.Timeline == sysident.Timeline &&
+		checkpoint.DBName == dbName &&
+		strings.TrimSpace(checkpoint.LastConfirmedLSN) != ""
+}
+
+func currentDatabaseName(databaseURL string) string {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(parsed.Path, "/")
+}
+
+func (r *Runtime) saveRuntimeCheckpoint(ctx context.Context, slotName string, lsn pglogrepl.LSN, sysident pglogrepl.IdentifySystemResult) error {
+	return r.store.SaveRuntimeCheckpoint(ctx, storage.RuntimeCheckpoint{
+		SlotName:         slotName,
+		LastConfirmedLSN: lsn.String(),
+		SystemID:         sysident.SystemID,
+		Timeline:         sysident.Timeline,
+		DBName:           currentDatabaseName(r.cfg.DatabaseURL),
+	})
+}
+
+func (r *Runtime) replicationSlotExists(ctx context.Context, pool *pgxpool.Pool, slotName string) (bool, error) {
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)`, slotName).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func (r *Runtime) ensurePublication(ctx context.Context, pool *pgxpool.Pool) error {
@@ -130,8 +228,7 @@ func (r *Runtime) ensurePublication(ctx context.Context, pool *pgxpool.Pool) err
 
 func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clientXLogPos pglogrepl.LSN) {
 	nextStandbyMessageDeadline := time.Now().Add(replicationStandbyTimeout)
-	relations := map[uint32]shapes.Relation{}
-	touched := map[string]shapes.Relation{}
+	batch := ChangeBatch{}
 
 	for {
 		if time.Now().After(nextStandbyMessageDeadline) {
@@ -191,7 +288,7 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 				return
 			}
 
-			commitLSN, err := r.handleLogicalMessage(xld.WALData, relations, touched)
+			commitLSN, err := r.handleLogicalMessage(ctx, xld.WALData, &batch)
 			if err != nil {
 				r.handleReplicationError(err, conn)
 				return
@@ -206,11 +303,7 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 	}
 }
 
-func (r *Runtime) handleLogicalMessage(
-	walData []byte,
-	relations map[uint32]shapes.Relation,
-	touched map[string]shapes.Relation,
-) (pglogrepl.LSN, error) {
+func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batch *ChangeBatch) (pglogrepl.LSN, error) {
 	logicalMsg, err := pglogrepl.Parse(walData)
 	if err != nil {
 		return 0, err
@@ -218,76 +311,275 @@ func (r *Runtime) handleLogicalMessage(
 
 	switch msg := logicalMsg.(type) {
 	case *pglogrepl.RelationMessage:
-		relations[msg.RelationID] = shapes.Relation{
-			Schema: msg.Namespace,
-			Table:  msg.RelationName,
+		if _, err := r.cacheRelationMetadata(ctx, msg.RelationID, msg); err != nil {
+			return 0, err
 		}
+	case *pglogrepl.BeginMessage:
+		batch.Reset(msg.Xid)
 	case *pglogrepl.InsertMessage:
-		r.touchRelation(relations, touched, msg.RelationID)
+		if err := r.recordInsert(batch, msg); err != nil {
+			return 0, err
+		}
 	case *pglogrepl.UpdateMessage:
-		r.touchRelation(relations, touched, msg.RelationID)
+		if err := r.recordUpdate(batch, msg); err != nil {
+			return 0, err
+		}
 	case *pglogrepl.DeleteMessage:
-		r.touchRelation(relations, touched, msg.RelationID)
+		if err := r.recordDelete(batch, msg); err != nil {
+			return 0, err
+		}
 	case *pglogrepl.TruncateMessage:
 		for _, relationID := range msg.RelationIDs {
-			if relation, ok := relations[relationID]; ok {
-				r.shapes.InvalidateByRelation(relation)
+			metadata, ok := r.relationMetadata(relationID)
+			if !ok {
+				continue
+			}
+			if err := r.invalidateUnsupportedShapesForRelation(metadata); err != nil {
+				return 0, err
+			}
+			if _, err := r.shapes.InvalidateByRelation(metadata.Relation); err != nil {
+				return 0, err
+			}
+			if metadata.RootRelation != metadata.Relation {
+				if _, err := r.shapes.InvalidateByRelation(metadata.RootRelation); err != nil {
+					return 0, err
+				}
 			}
 		}
 	case *pglogrepl.CommitMessage:
-		if err := r.refreshTouchedRelations(touched); err != nil {
+		batch.CommitLSN = msg.CommitLSN
+		if err := r.applyChangeBatch(ctx, *batch); err != nil {
 			return msg.TransactionEndLSN, err
 		}
-		clear(touched)
+		batch.Reset(0)
 		return msg.TransactionEndLSN, nil
 	}
 
 	return 0, nil
 }
 
-func (r *Runtime) refreshTouchedRelations(touched map[string]shapes.Relation) error {
-	if len(touched) == 0 {
+func (r *Runtime) recordInsert(batch *ChangeBatch, message *pglogrepl.InsertMessage) error {
+	metadata, ok := r.relationMetadata(message.RelationID)
+	if !ok {
 		return nil
 	}
 
-	keys := make([]string, 0, len(touched))
-	for key := range touched {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	newTuple := decodeTupleRow(metadata.Columns, message.Tuple)
+	batch.Add(message.RelationID, ChangeRecord{
+		Relation:   metadata.Relation,
+		Operation:  ChangeInsert,
+		PrimaryKey: primaryKeyRowForColumns(metadata.PKColumns, newTuple),
+		NewTuple:   newTuple,
+	})
+	return nil
+}
 
-	for _, key := range keys {
-		relation := touched[key]
-		for _, state := range r.shapes.ActiveByRelation(relation) {
-			snapshotCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			snapshot, err := r.Snapshot(snapshotCtx, shapes.SnapshotRequest{
-				Definition: state.Definition,
-				Mode:       shapes.SnapshotModeData,
-			})
-			cancel()
+func (r *Runtime) recordUpdate(batch *ChangeBatch, message *pglogrepl.UpdateMessage) error {
+	metadata, ok := r.relationMetadata(message.RelationID)
+	if !ok {
+		return nil
+	}
+
+	oldTupleColumns := metadata.Columns
+	if message.OldTupleType == pglogrepl.UpdateMessageTupleTypeKey {
+		oldTupleColumns = metadata.PKColumns
+	}
+	oldTuple := decodeTupleRow(oldTupleColumns, message.OldTuple)
+	newTuple := decodeTupleRow(metadata.Columns, message.NewTuple)
+
+	if key := primaryKeyRowForColumns(metadata.PKColumns, oldTuple); len(key) > 0 {
+		batch.Add(message.RelationID, ChangeRecord{
+			Relation:   metadata.Relation,
+			Operation:  ChangeUpdate,
+			PrimaryKey: key,
+			OldTuple:   oldTuple,
+			NewTuple:   newTuple,
+		})
+	}
+	if key := primaryKeyRowForColumns(metadata.PKColumns, newTuple); len(key) > 0 {
+		batch.Add(message.RelationID, ChangeRecord{
+			Relation:   metadata.Relation,
+			Operation:  ChangeUpdate,
+			PrimaryKey: key,
+			OldTuple:   oldTuple,
+			NewTuple:   newTuple,
+		})
+	}
+	return nil
+}
+
+func (r *Runtime) recordDelete(batch *ChangeBatch, message *pglogrepl.DeleteMessage) error {
+	metadata, ok := r.relationMetadata(message.RelationID)
+	if !ok {
+		return nil
+	}
+
+	oldTupleColumns := metadata.Columns
+	if message.OldTupleType == pglogrepl.DeleteMessageTupleTypeKey {
+		oldTupleColumns = metadata.PKColumns
+	}
+	oldTuple := decodeTupleRow(oldTupleColumns, message.OldTuple)
+	batch.Add(message.RelationID, ChangeRecord{
+		Relation:   metadata.Relation,
+		Operation:  ChangeDelete,
+		PrimaryKey: primaryKeyRowForColumns(metadata.PKColumns, oldTuple),
+		OldTuple:   oldTuple,
+	})
+	return nil
+}
+
+func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error {
+	for _, relationID := range batch.RelationIDs() {
+		metadata, ok := r.relationMetadata(relationID)
+		if !ok {
+			continue
+		}
+		if err := r.invalidateUnsupportedShapesForRelation(metadata); err != nil {
+			return err
+		}
+
+		changes := batch.ChangesForRelation(relationID)
+		if len(changes) == 0 {
+			continue
+		}
+
+		keyRows := make([]shapes.Row, 0, len(changes))
+		for _, change := range changes {
+			if len(change.PrimaryKey) == 0 {
+				continue
+			}
+			keyRows = append(keyRows, change.PrimaryKey)
+		}
+		if len(keyRows) == 0 {
+			continue
+		}
+
+		for _, state := range r.candidateShapes(metadata) {
+			if !definitionSupportsTargetedRefresh(state.Definition) {
+				continue
+			}
+
+			snapshot, err := r.snapshotChangedKeys(ctx, state.Definition, metadata, keyRows)
 			if err != nil {
-				var relationMissing shapes.RelationNotFoundError
-				if errors.As(err, &relationMissing) {
-					r.shapes.InvalidateByRelation(relation)
-					break
+				var missing shapes.RelationNotFoundError
+				if errors.As(err, &missing) {
+					if _, invalidateErr := r.shapes.InvalidateByRelation(state.Definition.Relation); invalidateErr != nil {
+						return invalidateErr
+					}
+					continue
 				}
 				return err
 			}
-			if _, _, err := r.shapes.Refresh(state.Handle, snapshot); err != nil && !errors.Is(err, shapes.ErrShapeDeleted) {
+
+			if _, _, err := r.shapes.RefreshKeysWithMetadata(state.Handle, snapshot, keyRows, shapes.ChangeMetadata{
+				KeyRelation:   metadata.Relation,
+				CommitLSN:     uint64(batch.CommitLSN),
+				TransactionID: batch.XID,
+			}); err != nil && !errors.Is(err, shapes.ErrShapeDeleted) && !errors.Is(err, shapes.ErrShapeNotFound) {
 				return err
 			}
 		}
 	}
 
+	if batch.CommitLSN > 0 {
+		r.mu.RLock()
+		slotName := r.replicationSlot
+		sysident := r.systemIdentity
+		r.mu.RUnlock()
+		if slotName == "" {
+			slotName = r.replicationSlotName()
+		}
+		return r.saveRuntimeCheckpoint(ctx, slotName, batch.CommitLSN, sysident)
+	}
 	return nil
 }
 
-func (r *Runtime) touchRelation(relations map[uint32]shapes.Relation, touched map[string]shapes.Relation, relationID uint32) {
-	relation, ok := relations[relationID]
-	if !ok {
-		return
+func (r *Runtime) invalidateUnsupportedShapesForRelation(metadata relationMetadata) error {
+	for _, state := range r.shapes.ActiveStates() {
+		if !definitionRequiresInvalidationForRelation(state.Definition, metadata.Relation, metadata.RootRelation) {
+			continue
+		}
+		if _, err := r.shapes.Delete(state.Handle); err != nil && !errors.Is(err, shapes.ErrShapeNotFound) && !errors.Is(err, shapes.ErrShapeDeleted) {
+			return err
+		}
 	}
-	touched[relationMapKey(relation)] = relation
+	return nil
+}
+
+func (r *Runtime) candidateShapes(metadata relationMetadata) []shapes.State {
+	states := append([]shapes.State{}, r.shapes.ActiveByRelation(metadata.Relation)...)
+	if metadata.RootRelation != metadata.Relation {
+		states = append(states, r.shapes.ActiveByRelation(metadata.RootRelation)...)
+	}
+
+	sort.Slice(states, func(i, j int) bool {
+		return states[i].Handle < states[j].Handle
+	})
+
+	deduped := make([]shapes.State, 0, len(states))
+	seen := map[string]struct{}{}
+	for _, state := range states {
+		if _, ok := seen[state.Handle]; ok {
+			continue
+		}
+		seen[state.Handle] = struct{}{}
+		deduped = append(deduped, state)
+	}
+	return deduped
+}
+
+func (r *Runtime) snapshotChangedKeys(ctx context.Context, def shapes.Definition, metadata relationMetadata, keyRows []shapes.Row) (shapes.SnapshotResult, error) {
+	pool, err := r.ensurePool(ctx)
+	if err != nil {
+		return shapes.SnapshotResult{}, err
+	}
+
+	result := shapes.SnapshotResult{
+		Schema: map[string]shapes.ColumnSchema{},
+	}
+	selectedColumns := targetedSnapshotColumns(metadata, def.Columns)
+	for _, column := range selectedColumns {
+		result.Schema[column.Name] = shapes.ColumnSchema{
+			Type:    column.Type,
+			NotNull: column.NotNull,
+			PKIndex: column.PKIndex,
+		}
+	}
+
+	query, args, err := buildTargetedSnapshotQuery(def, selectedColumns, metadata.PKColumns, keyRows)
+	if err != nil {
+		return shapes.SnapshotResult{}, err
+	}
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return shapes.SnapshotResult{}, shapes.RelationNotFoundError{Relation: def.Relation}
+		}
+		return shapes.SnapshotResult{}, err
+	}
+	defer rows.Close()
+
+	fieldDescriptions := rows.FieldDescriptions()
+	for rows.Next() {
+		values, err := rows.Values()
+		if err != nil {
+			return shapes.SnapshotResult{}, err
+		}
+
+		row := shapes.Row{}
+		for index, field := range fieldDescriptions {
+			if values[index] == nil {
+				row[string(field.Name)] = nil
+				continue
+			}
+			row[string(field.Name)] = fmt.Sprint(values[index])
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	return result, rows.Err()
 }
 
 func (r *Runtime) handleReplicationError(err error, conn *pgconn.PgConn) {
@@ -299,6 +591,8 @@ func (r *Runtime) handleReplicationError(err error, conn *pgconn.PgConn) {
 	if r.replicationConn == conn {
 		r.replicationConn = nil
 		r.replicationCancel = nil
+		r.replicationSlot = ""
+		r.relationCache = map[uint32]relationMetadata{}
 		if r.status != StatusStopped {
 			r.status = StatusWaiting
 		}
@@ -311,6 +605,10 @@ func (r *Runtime) publicationName() string {
 }
 
 func (r *Runtime) replicationSlotName() string {
+	if r.store != nil && r.store.Kind() == "disk" {
+		return compactIdentifier("pulsesync_"+r.cfg.ReplicationStreamID+"_slot", 63)
+	}
+
 	base := compactIdentifier("pulsesync_"+r.cfg.ReplicationStreamID+"_slot", 48)
 	return compactIdentifier(fmt.Sprintf("%s_%x", base, time.Now().UnixNano()), 63)
 }
@@ -325,26 +623,17 @@ func compactIdentifier(value string, maxLen int) string {
 		case char >= '0' && char <= '9':
 			builder.WriteRune(char)
 		default:
-			builder.WriteByte('_')
+			builder.WriteRune('_')
 		}
 	}
 
-	identifier := strings.Trim(builder.String(), "_")
-	for strings.Contains(identifier, "__") {
-		identifier = strings.ReplaceAll(identifier, "__", "_")
+	compact := builder.String()
+	compact = strings.Trim(compact, "_")
+	if compact == "" {
+		compact = "pulsesync"
 	}
-	if identifier == "" {
-		identifier = "pulsesync"
+	if len(compact) > maxLen {
+		compact = compact[:maxLen]
 	}
-	if identifier[0] >= '0' && identifier[0] <= '9' {
-		identifier = "p_" + identifier
-	}
-	if len(identifier) > maxLen {
-		identifier = identifier[:maxLen]
-	}
-	return strings.TrimRight(identifier, "_")
-}
-
-func relationMapKey(relation shapes.Relation) string {
-	return relation.Schema + "." + relation.Table
+	return compact
 }
