@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: electric
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+    ports:
+      - "127.0.0.1:${DB_PORT:-45432}:5432"
+    volumes:
+      - e2e-postgres-data:/var/lib/postgresql/data
+      - ./seed.sql:/docker-entrypoint-initdb.d/010-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pulsesync:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      ELECTRIC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      ELECTRIC_SECRET: ${SECRET:-test-secret}
+      ELECTRIC_PORT: 3100
+      ELECTRIC_REPLICATION_STREAM_ID: ${PULSE_STREAM_ID:-pulsecmp}
+      ELECTRIC_STORAGE_MODE: ${PULSE_STORAGE_MODE:-memory}
+      ELECTRIC_STORAGE_DIR: ${PULSE_STORAGE_DIR:-/var/lib/pulsesync}
+      ELECTRIC_MAX_CONCURRENT_REQUESTS: ${SCENARIO_MAX_CONCURRENT_REQUESTS}
+      ELECTRIC_LONG_POLL_TIMEOUT_MS: ${SCENARIO_LONG_POLL_TIMEOUT_MS}
+      ELECTRIC_SSE_TIMEOUT_MS: ${SCENARIO_SSE_TIMEOUT_MS}
+      ELECTRIC_FEATURE_FLAGS: ${SCENARIO_FEATURE_FLAGS}
+    ports:
+      - "127.0.0.1:${PULSE_PORT:-43100}:3100"
+    volumes:
+      - ${PULSE_STORAGE_BIND_DIR:-./_runtime/pulsesync-storage}:${PULSE_STORAGE_DIR:-/var/lib/pulsesync}
+
+  electric:
+    build:
+      context: ../../electric/packages/sync-service
+      dockerfile: Dockerfile
+      additional_contexts:
+        electric-telemetry: ../../electric/packages/electric-telemetry
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      ELECTRIC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      ELECTRIC_SECRET: ${SECRET:-test-secret}
+      ELECTRIC_INSECURE: "false"
+      ELECTRIC_LOG_LEVEL: debug
+      ELECTRIC_PORT: 3000
+      ELECTRIC_REPLICATION_STREAM_ID: ${ELECTRIC_STREAM_ID:-electriccmp}
+      ELECTRIC_MAX_CONCURRENT_REQUESTS: ${SCENARIO_MAX_CONCURRENT_REQUESTS}
+      ELECTRIC_LONG_POLL_TIMEOUT_MS: ${SCENARIO_LONG_POLL_TIMEOUT_MS}
+      ELECTRIC_SSE_TIMEOUT_MS: ${SCENARIO_SSE_TIMEOUT_MS}
+      ELECTRIC_FEATURE_FLAGS: ${SCENARIO_FEATURE_FLAGS}
+      CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN: "true"
+    ports:
+      - "127.0.0.1:${ELECTRIC_PORT:-43200}:3000"
+
+volumes:
+  e2e-postgres-data:
