@@ -56,8 +56,12 @@ func TestServiceInitialSnapshot(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if got := body[0]["key"]; got != "1" {
+	if got := body[0]["key"]; got != `"public"."items"/"1"` {
 		t.Fatalf("first key = %v", got)
+	}
+	rowHeaders, _ := body[0]["headers"].(map[string]any)
+	if relation, _ := rowHeaders["relation"].([]any); len(relation) != 2 || relation[0] != "public" || relation[1] != "items" {
+		t.Fatalf("relation = %+v", rowHeaders["relation"])
 	}
 
 	headers, _ := body[1]["headers"].(map[string]any)
@@ -88,7 +92,7 @@ func TestServiceInitialSnapshotChangesOnlyReturnsSnapshotEndOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if rec.Header().Get("electric-has-data") != "false" {
+	if rec.Header().Get("electric-has-data") != "true" {
 		t.Fatalf("electric-has-data = %q", rec.Header().Get("electric-has-data"))
 	}
 
@@ -264,7 +268,7 @@ func TestServiceSubsetSnapshotPostBodyUsesCanonicalHandle(t *testing.T) {
 	if len(payload.Data) != 1 {
 		t.Fatalf("data length = %d, want 1", len(payload.Data))
 	}
-	if payload.Data[0]["key"] != "2" {
+	if payload.Data[0]["key"] != `"public"."items"/"2"` {
 		t.Fatalf("key = %v", payload.Data[0]["key"])
 	}
 }
@@ -387,6 +391,9 @@ func TestServiceMustRefetchOnHandleMismatch(t *testing.T) {
 	}
 	if _, ok := rec.Header()["Electric-Has-Data"]; ok {
 		t.Fatalf("unexpected electric-has-data header: %+v", rec.Header()["Electric-Has-Data"])
+	}
+	if _, ok := rec.Header()["Electric-Offset"]; ok {
+		t.Fatalf("unexpected electric-offset header: %+v", rec.Header()["Electric-Offset"])
 	}
 
 	var body []map[string]any
@@ -629,8 +636,11 @@ func TestServiceLiveLongPollReceivesAppendedChange(t *testing.T) {
 		t.Fatalf("expected electric-cursor header")
 	}
 
-	if body[0]["offset"] != "0_1" {
-		t.Fatalf("offset = %v", body[0]["offset"])
+	if _, ok := body[0]["offset"]; ok {
+		t.Fatalf("unexpected offset in body: %+v", body[0]["offset"])
+	}
+	if rec.Header().Get("electric-offset") != "0_1" {
+		t.Fatalf("electric-offset = %q", rec.Header().Get("electric-offset"))
 	}
 	headers, _ := body[1]["headers"].(map[string]any)
 	if headers["control"] != "up-to-date" {
@@ -697,8 +707,11 @@ func TestServiceLiveLongPollReceivesRefreshedUpdate(t *testing.T) {
 	if len(body) != 2 {
 		t.Fatalf("body length = %d, want 2", len(body))
 	}
-	if body[0]["offset"] != "0_1" {
-		t.Fatalf("offset = %v", body[0]["offset"])
+	if _, ok := body[0]["offset"]; ok {
+		t.Fatalf("unexpected offset in body: %+v", body[0]["offset"])
+	}
+	if rec.Header().Get("electric-offset") != "0_1" {
+		t.Fatalf("electric-offset = %q", rec.Header().Get("electric-offset"))
 	}
 	if body[0]["value"].(map[string]any)["value"] != "after" {
 		t.Fatalf("value = %+v", body[0]["value"])
@@ -790,7 +803,9 @@ func TestServiceLiveSSEFormatsEvents(t *testing.T) {
 	}()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=0_0&handle="+handle+"&live=true&live_sse=true&secret=test-secret", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=0_0&handle="+handle+"&live=true&live_sse=true&secret=test-secret", nil).WithContext(ctx)
 	service.HandleShape(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -802,6 +817,9 @@ func TestServiceLiveSSEFormatsEvents(t *testing.T) {
 	}
 	if got := rec.Header().Get("cache-control"); got != "public, max-age=59" {
 		t.Fatalf("cache-control = %q", got)
+	}
+	if got := rec.Header().Get("electric-offset"); got != "0_inf" {
+		t.Fatalf("electric-offset = %q", got)
 	}
 	if rec.Header().Get("electric-has-data") != "true" {
 		t.Fatalf("electric-has-data = %q", rec.Header().Get("electric-has-data"))
@@ -820,6 +838,105 @@ func TestServiceLiveSSEFormatsEvents(t *testing.T) {
 	if !strings.Contains(body, "data:") || !strings.Contains(body, `"control":"up-to-date"`) {
 		t.Fatalf("unexpected sse body: %q", body)
 	}
+}
+
+func TestServiceLiveSSEEmitsKeepaliveComments(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{
+		snapshot: shapes.SnapshotResult{
+			Schema: map[string]shapes.ColumnSchema{
+				"id": {Type: "uuid", PKIndex: intPtr(0)},
+			},
+		},
+	})
+	service.cfg.LongPollTimeoutMS = 1000
+	service.cfg.SSETimeoutMS = 10
+
+	initial := httptest.NewRecorder()
+	service.HandleShape(initial, httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&secret=test-secret", nil))
+	handle := initial.Header().Get("electric-handle")
+
+	rec := httptest.NewRecorder()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=0_0&handle="+handle+"&live=true&live_sse=true&secret=test-secret", nil).WithContext(ctx)
+	service.HandleShape(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `: keep-alive`) {
+		t.Fatalf("expected keepalive comment in body: %q", body)
+	}
+}
+
+func TestServiceOverloadRejectsExistingRequests(t *testing.T) {
+	t.Parallel()
+
+	service, manager := newTestService(stubBackend{
+		snapshot: shapes.SnapshotResult{
+			Schema: map[string]shapes.ColumnSchema{
+				"id": {Type: "uuid", PKIndex: intPtr(0)},
+			},
+		},
+	})
+	service.cfg.LongPollTimeoutMS = 100
+	service.cfg.MaxConcurrentRequests.Initial = 10
+	service.cfg.MaxConcurrentRequests.Existing = 1
+	service.admission = newAdmissionController(10, 1)
+
+	initial := httptest.NewRecorder()
+	service.HandleShape(initial, httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&secret=test-secret", nil))
+	handle := initial.Header().Get("electric-handle")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		defer cancel()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=0_0&handle="+handle+"&live=true&secret=test-secret", nil).WithContext(ctx)
+		service.HandleShape(rec, req)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=0_0&handle="+handle+"&live=true&secret=test-secret", nil)
+	service.HandleShape(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") != "10" {
+		t.Fatalf("Retry-After = %q", rec.Header().Get("Retry-After"))
+	}
+	if rec.Header().Get("electric-internal-known-error") != "true" {
+		t.Fatalf("electric-internal-known-error = %q", rec.Header().Get("electric-internal-known-error"))
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if body["code"] != "concurrent_request_limit_exceeded" {
+		t.Fatalf("code = %v", body["code"])
+	}
+	if body["message"] != "Concurrent existing request limit exceeded (limit: 1), please retry" {
+		t.Fatalf("message = %v", body["message"])
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for blocked request to finish")
+	}
+
+	_, _ = manager.Append(handle, []shapes.Message{
+		{
+			Headers: map[string]any{"operation": "insert"},
+			Key:     "1",
+			Value:   shapes.Row{"id": "1"},
+		},
+	})
 }
 
 type stubBackend struct {
@@ -845,7 +962,10 @@ func newTestService(backend shapes.Backend) (*Service, *shapes.Manager) {
 	cfg.Secret = "test-secret"
 	cfg.AllowShapeDeletion = true
 
-	manager := shapes.NewManager(storage.NewMemoryStore())
+	manager, err := shapes.NewManager(storage.NewMemoryStore())
+	if err != nil {
+		panic(err)
+	}
 	return NewService(cfg, manager, backend), manager
 }
 
