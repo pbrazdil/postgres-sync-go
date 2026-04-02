@@ -7,6 +7,7 @@ import (
 )
 
 const InitialOffset = "0_0"
+const NowOffset = "0_inf"
 
 type SnapshotMode string
 
@@ -17,17 +18,19 @@ const (
 
 type ColumnSchema struct {
 	Type    string `json:"type"`
+	NotNull bool   `json:"not_null"`
 	PKIndex *int   `json:"pk_index,omitempty"`
 }
 
 type Row map[string]any
 
 type Message struct {
-	Headers  map[string]any `json:"headers"`
-	Key      string         `json:"key,omitempty"`
-	Value    Row            `json:"value,omitempty"`
-	OldValue Row            `json:"old_value,omitempty"`
-	Offset   string         `json:"offset,omitempty"`
+	Headers     map[string]any `json:"headers"`
+	Key         string         `json:"key,omitempty"`
+	Value       Row            `json:"value,omitempty"`
+	OldValue    Row            `json:"old_value,omitempty"`
+	Offset      string         `json:"-"`
+	InternalKey string         `json:"-"`
 }
 
 type SnapshotMetadata struct {
