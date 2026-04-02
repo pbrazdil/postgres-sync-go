@@ -1,12 +1,10 @@
 package protocol
 
 import (
+	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/petrbrazdil/pulsesync/internal/config"
@@ -14,9 +12,10 @@ import (
 )
 
 type Service struct {
-	cfg     config.Config
-	shapes  *shapes.Manager
-	backend shapes.Backend
+	cfg       config.Config
+	shapes    *shapes.Manager
+	backend   shapes.Backend
+	admission *admissionController
 }
 
 func NewService(cfg config.Config, manager *shapes.Manager, backend shapes.Backend) *Service {
@@ -24,6 +23,10 @@ func NewService(cfg config.Config, manager *shapes.Manager, backend shapes.Backe
 		cfg:     cfg,
 		shapes:  manager,
 		backend: backend,
+		admission: newAdmissionController(
+			cfg.MaxConcurrentRequests.Initial,
+			cfg.MaxConcurrentRequests.Existing,
+		),
 	}
 }
 
@@ -71,6 +74,13 @@ func (s *Service) HandleShape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	release, ok := s.admission.acquire(request)
+	if !ok {
+		WriteOverloadedWithRequest(w, request, s.cfg.MaxConcurrentRequests)
+		return
+	}
+	defer release()
+
 	switch request.Offset {
 	case "-1":
 		s.serveInitialSnapshot(w, r, request, queryDefinition)
@@ -99,15 +109,22 @@ func (s *Service) serveInitialSnapshot(w http.ResponseWriter, r *http.Request, r
 	snapshot, err := s.backend.Snapshot(r.Context(), shapes.SnapshotRequest{
 		Definition: def,
 		Mode:       shapes.SnapshotModeData,
+		Metadata:   true,
 	})
 	if err != nil {
 		s.writeSnapshotError(w, err)
 		return
 	}
 
-	state := s.shapes.UpsertSnapshot(def, snapshot)
+	state, err := s.shapes.UpsertSnapshot(def, snapshot)
+	if err != nil {
+		WriteError(w, http.StatusServiceUnavailable, map[string]any{
+			"message": err.Error(),
+		})
+		return
+	}
 	headers := SuccessHeaderOptions{
-		HasData: len(state.Snapshot) > 0,
+		HasData: len(snapshot.Rows) > 0,
 	}
 	WriteSuccessHeaders(w, s.cfg, req, state, headers)
 
@@ -120,23 +137,46 @@ func (s *Service) serveInitialSnapshot(w http.ResponseWriter, r *http.Request, r
 	for _, message := range state.Snapshot {
 		body = append(body, message)
 	}
-	body = append(body, map[string]any{
-		"headers": map[string]any{"control": "snapshot-end"},
-	})
+	body = append(body, snapshotEndControl(snapshot.Metadata))
 	WriteJSON(w, http.StatusOK, body)
 }
 
 func (s *Service) serveNow(w http.ResponseWriter, r *http.Request, req ShapeRequest, def shapes.Definition) {
+	if state, ok := s.shapes.LookupByDefinition(def); ok {
+		headers := SuccessHeaderOptions{
+			HasData:   false,
+			UpToDate:  true,
+			NoChanges: true,
+		}
+		WriteSuccessHeaders(w, s.cfg, req, state, headers)
+		if matchesIfNoneMatch(r, state, req.Offset, headers.NoChanges) {
+			WriteNotModified(w, s.cfg, req, state, headers)
+			return
+		}
+
+		WriteJSON(w, http.StatusOK, []any{
+			upToDateControl(currentGlobalLSN(state)),
+		})
+		return
+	}
+
 	snapshot, err := s.backend.Snapshot(r.Context(), shapes.SnapshotRequest{
 		Definition: def,
 		Mode:       shapes.SnapshotModeData,
+		Metadata:   true,
 	})
 	if err != nil {
 		s.writeSnapshotError(w, err)
 		return
 	}
 
-	state := s.shapes.UpsertSnapshot(def, snapshot)
+	state, err := s.shapes.UpsertSnapshotAtOffset(def, snapshot, shapes.NowOffset)
+	if err != nil {
+		WriteError(w, http.StatusServiceUnavailable, map[string]any{
+			"message": err.Error(),
+		})
+		return
+	}
 	headers := SuccessHeaderOptions{
 		HasData:   false,
 		UpToDate:  true,
@@ -150,7 +190,7 @@ func (s *Service) serveNow(w http.ResponseWriter, r *http.Request, req ShapeRequ
 	}
 
 	WriteJSON(w, http.StatusOK, []any{
-		map[string]any{"headers": map[string]any{"control": "up-to-date"}},
+		upToDateControl(snapshotDatabaseLSN(snapshot.Metadata)),
 	})
 }
 
@@ -175,6 +215,11 @@ func (s *Service) serveContinuation(w http.ResponseWriter, r *http.Request, req 
 	_, hash := s.shapes.Canonicalize(def)
 	if state.Hash != hash {
 		s.mustRefetch(w, r.Context(), req, def)
+		return
+	}
+
+	if req.LiveSSE {
+		s.serveLiveSSE(w, r, req, def, state, messages)
 		return
 	}
 
@@ -210,7 +255,7 @@ func (s *Service) serveContinuation(w http.ResponseWriter, r *http.Request, req 
 
 	headers := SuccessHeaderOptions{
 		HasData:   len(messages) > 0,
-		UpToDate:  len(messages) == 0 || req.Live,
+		UpToDate:  true,
 		NoChanges: len(messages) == 0,
 	}
 	WriteSuccessHeaders(w, s.cfg, req, state, headers)
@@ -223,14 +268,7 @@ func (s *Service) serveContinuation(w http.ResponseWriter, r *http.Request, req 
 	for _, message := range messages {
 		body = append(body, message)
 	}
-	if len(messages) == 0 || req.Live {
-		body = append(body, map[string]any{"headers": map[string]any{"control": "up-to-date"}})
-	}
-
-	if req.LiveSSE {
-		s.writeSSE(w, req, body)
-		return
-	}
+	body = append(body, upToDateControl(currentGlobalLSN(state)))
 
 	WriteJSON(w, http.StatusOK, body)
 }
@@ -245,7 +283,13 @@ func (s *Service) mustRefetch(w http.ResponseWriter, ctx context.Context, req Sh
 		return
 	}
 
-	state := s.shapes.UpsertSnapshot(def, snapshot)
+	state, err := s.shapes.UpsertSnapshot(def, snapshot)
+	if err != nil {
+		WriteError(w, http.StatusServiceUnavailable, map[string]any{
+			"message": err.Error(),
+		})
+		return
+	}
 	WriteMustRefetchHeaders(w, req, state)
 	WriteJSON(w, http.StatusConflict, []any{
 		map[string]any{"headers": map[string]any{"control": "must-refetch"}},
@@ -303,14 +347,24 @@ func (s *Service) deleteShape(w http.ResponseWriter, req ShapeRequest, def shape
 	}
 
 	if req.Handle != "" {
-		_ = s.shapes.Delete(req.Handle)
+		if _, err := s.shapes.Delete(req.Handle); err != nil {
+			WriteError(w, http.StatusServiceUnavailable, map[string]any{
+				"message": err.Error(),
+			})
+			return
+		}
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
 	if state, ok := s.shapes.LookupByDefinition(def); ok {
-		_ = s.shapes.Delete(state.Handle)
+		if _, err := s.shapes.Delete(state.Handle); err != nil {
+			WriteError(w, http.StatusServiceUnavailable, map[string]any{
+				"message": err.Error(),
+			})
+			return
+		}
 	}
 
 	w.Header().Set("Cache-Control", "no-cache")
@@ -322,6 +376,83 @@ func (s *Service) writeSSE(w http.ResponseWriter, req ShapeRequest, body []any) 
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Cache-Control", cacheControlValue(s.cfg, req))
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(SSEPayload(body)))
+}
+
+func (s *Service) serveLiveSSE(w http.ResponseWriter, r *http.Request, req ShapeRequest, def shapes.Definition, state shapes.State, messages []shapes.Message) {
+	headers := SuccessHeaderOptions{
+		HasData:   true,
+		UpToDate:  true,
+		NoChanges: len(messages) == 0,
+	}
+	WriteSuccessHeaders(w, s.cfg, req, state, headers)
+	if matchesIfNoneMatch(r, state, req.Offset, headers.NoChanges) {
+		WriteNotModified(w, s.cfg, req, state, headers)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		WriteError(w, http.StatusServiceUnavailable, map[string]any{
+			"message": "streaming is not supported by this response writer",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Cache-Control", cacheControlValue(s.cfg, req))
+	w.WriteHeader(http.StatusOK)
+
+	currentOffset := req.Offset
+	if len(messages) > 0 {
+		s.writeSSEEvents(w, messagesToBody(messages, currentGlobalLSN(state)))
+		currentOffset = state.CurrentOffset
+	}
+	flusher.Flush()
+
+	keepaliveEvery := time.Duration(s.cfg.SSETimeoutMS) * time.Millisecond
+	if keepaliveEvery <= 0 {
+		keepaliveEvery = time.Second
+	}
+
+	writer := bufio.NewWriter(w)
+	for {
+		waitCtx, cancel := context.WithTimeout(r.Context(), keepaliveEvery)
+		nextState, nextMessages, err := s.shapes.WaitForChange(waitCtx, req.Handle, currentOffset)
+		cancel()
+
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			if r.Context().Err() != nil {
+				return
+			}
+			_, _ = writer.WriteString(": keep-alive\n\n")
+			_ = writer.Flush()
+			flusher.Flush()
+			continue
+		case errors.Is(err, shapes.ErrShapeNotFound), errors.Is(err, shapes.ErrShapeDeleted):
+			s.writeSSEEvents(w, controlBody("must-refetch", ""))
+			flusher.Flush()
+			return
+		case errors.Is(err, shapes.ErrOffsetOutOfRange):
+			s.writeSSEEvents(w, controlBody("must-refetch", ""))
+			flusher.Flush()
+			return
+		case err != nil:
+			return
+		case len(nextMessages) == 0:
+			s.writeSSEEvents(w, controlBody("up-to-date", currentGlobalLSN(nextState)))
+			flusher.Flush()
+		default:
+			s.writeSSEEvents(w, messagesToBody(nextMessages, currentGlobalLSN(nextState)))
+			flusher.Flush()
+			currentOffset = nextState.CurrentOffset
+		}
+	}
+}
+
+func (s *Service) writeSSEEvents(w http.ResponseWriter, body []any) {
 	_, _ = w.Write([]byte(SSEPayload(body)))
 }
 
@@ -362,7 +493,7 @@ func (s *Service) serveSubsetSnapshot(w http.ResponseWriter, r *http.Request, re
 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"metadata": metadata,
-		"data":     subsetDataMessages(snapshot, metadata.SnapshotMark),
+		"data":     subsetDataMessages(queryDef.Relation, snapshot, metadata.SnapshotMark),
 	})
 }
 
@@ -391,7 +522,11 @@ func (s *Service) resolveSubsetShape(ctx context.Context, req ShapeRequest, shap
 		return shapes.State{}, err
 	}
 
-	return s.shapes.UpsertSnapshot(shapeDef, snapshot), nil
+	state, err := s.shapes.UpsertSnapshot(shapeDef, snapshot)
+	if err != nil {
+		return shapes.State{}, err
+	}
+	return state, nil
 }
 
 func (s *Service) writeSubsetResolutionError(w http.ResponseWriter, ctx context.Context, req ShapeRequest, shapeDef shapes.Definition, err error) {
@@ -403,19 +538,35 @@ func (s *Service) writeSubsetResolutionError(w http.ResponseWriter, ctx context.
 	}
 }
 
-func subsetDataMessages(snapshot shapes.SnapshotResult, snapshotMark int) []any {
+func subsetDataMessages(relation shapes.Relation, snapshot shapes.SnapshotResult, snapshotMark int) []any {
 	messages := make([]any, 0, len(snapshot.Rows))
 	for _, row := range snapshot.Rows {
 		messages = append(messages, map[string]any{
 			"headers": map[string]any{
 				"operation":     "insert",
+				"relation":      shapes.RelationHeader(relation),
 				"snapshot_mark": snapshotMark,
 			},
-			"key":   subsetRowKey(snapshot.Schema, row),
+			"key":   shapes.MessageKey(relation, snapshot.Schema, row),
 			"value": row,
 		})
 	}
 	return messages
+}
+
+func messagesToBody(messages []shapes.Message, globalLastSeenLSN string) []any {
+	body := make([]any, 0, len(messages)+1)
+	for _, message := range messages {
+		body = append(body, message)
+	}
+	body = append(body, upToDateControl(globalLastSeenLSN))
+	return body
+}
+
+func controlBody(control string, globalLastSeenLSN string) []any {
+	return []any{
+		controlMessage(control, globalLastSeenLSN),
+	}
 }
 
 func subsetMetadata(metadata *shapes.SnapshotMetadata) *shapes.SnapshotMetadata {
@@ -424,39 +575,53 @@ func subsetMetadata(metadata *shapes.SnapshotMetadata) *shapes.SnapshotMetadata 
 	}
 	return &shapes.SnapshotMetadata{
 		SnapshotMark: 1,
-		DatabaseLSN:  "0/0",
+		DatabaseLSN:  "0",
 		XMin:         "0",
 		XMax:         "0",
-		XIPList:      nil,
+		XIPList:      []string{},
 	}
 }
 
-func subsetRowKey(schema map[string]shapes.ColumnSchema, row shapes.Row) string {
-	type pair struct {
-		index int
-		value string
+func snapshotEndControl(metadata *shapes.SnapshotMetadata) map[string]any {
+	headers := map[string]any{
+		"control":  "snapshot-end",
+		"xmin":     "0",
+		"xmax":     "0",
+		"xip_list": []string{},
 	}
-
-	pairs := make([]pair, 0, len(schema))
-	for name, column := range schema {
-		if column.PKIndex == nil {
-			continue
+	if metadata != nil {
+		headers["xmin"] = metadata.XMin
+		headers["xmax"] = metadata.XMax
+		if metadata.XIPList != nil {
+			headers["xip_list"] = metadata.XIPList
 		}
-		pairs = append(pairs, pair{
-			index: *column.PKIndex,
-			value: fmt.Sprint(row[name]),
-		})
 	}
-	sort.Slice(pairs, func(i, j int) bool {
-		return pairs[i].index < pairs[j].index
-	})
-	if len(pairs) == 0 {
+	return map[string]any{"headers": headers}
+}
+
+func upToDateControl(globalLastSeenLSN string) map[string]any {
+	return controlMessage("up-to-date", globalLastSeenLSN)
+}
+
+func controlMessage(control string, globalLastSeenLSN string) map[string]any {
+	headers := map[string]any{"control": control}
+	if control == "up-to-date" && globalLastSeenLSN != "" {
+		headers["global_last_seen_lsn"] = globalLastSeenLSN
+	}
+	return map[string]any{"headers": headers}
+}
+
+func snapshotDatabaseLSN(metadata *shapes.SnapshotMetadata) string {
+	if metadata == nil {
 		return ""
 	}
+	return metadata.DatabaseLSN
+}
 
-	values := make([]string, 0, len(pairs))
-	for _, pair := range pairs {
-		values = append(values, pair.value)
+func currentGlobalLSN(state shapes.State) string {
+	lsn, ok := shapes.OffsetLSN(state.CurrentOffset)
+	if ok {
+		return lsn
 	}
-	return strings.Join(values, ",")
+	return ""
 }
