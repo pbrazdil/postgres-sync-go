@@ -1,0 +1,7 @@
+.git
+.gitignore
+.pulsesync
+electric
+test/e2e/_artifacts
+*.log
+*.tmp
