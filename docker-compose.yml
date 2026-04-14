@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: electric
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+    ports:
+      - "127.0.0.1:${PULSESYNC_POSTGRES_PORT:-45432}:5432"
+    volumes:
+      - pulsesync-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pulsesync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      ELECTRIC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-secret}
+      ELECTRIC_PORT: 3000
+      ELECTRIC_REPLICATION_STREAM_ID: ${ELECTRIC_REPLICATION_STREAM_ID:-docker}
+      ELECTRIC_STORAGE_MODE: ${ELECTRIC_STORAGE_MODE:-disk}
+      ELECTRIC_STORAGE_DIR: /var/lib/pulsesync
+    ports:
+      - "127.0.0.1:${PULSESYNC_HTTP_PORT:-43100}:3000"
+    volumes:
+      - pulsesync-data:/var/lib/pulsesync
+    restart: unless-stopped
+
+volumes:
+  pulsesync-postgres-data:
+  pulsesync-data:

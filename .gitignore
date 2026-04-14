@@ -1,1 +1,7 @@
 electric/
+test/e2e/_artifacts/
+/pulsesync
+test/e2e/_runtime/
+.DS_Store
+.env
+.env.local

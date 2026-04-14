@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"sync"
 
 	internalconfig "github.com/petrbrazdil/pulsesync/internal/config"
@@ -42,13 +43,25 @@ func New(cfg Config) (*Engine, error) {
 	case "", internalconfig.StorageModeMemory:
 		storeImpl = storage.NewMemoryStore()
 	case internalconfig.StorageModeDisk:
-		return nil, errors.New("disk storage mode is not implemented yet")
+		dir := cfg.Storage.Dir
+		if dir == "" {
+			dir = filepath.Join(".", ".pulsesync")
+		}
+
+		diskStore, err := storage.NewDiskStore(dir)
+		if err != nil {
+			return nil, err
+		}
+		storeImpl = diskStore
 	default:
 		return nil, errors.New("unsupported storage mode")
 	}
 
-	shapeManager := shapes.NewManager(storeImpl)
-	runtime := pg.NewRuntime(cfg, shapeManager)
+	shapeManager, err := shapes.NewManager(storeImpl)
+	if err != nil {
+		return nil, err
+	}
+	runtime := pg.NewRuntime(cfg, shapeManager, storeImpl)
 	telemetryProvider := telemetry.NewProvider(Version, cfg.Telemetry)
 	protocolService := protocol.NewService(cfg, shapeManager, runtime)
 	router := httpapi.NewRouter("PulseSync/"+Version, protocolService, telemetryProvider, runtime)

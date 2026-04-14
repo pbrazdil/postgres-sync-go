@@ -6,11 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +54,12 @@ type State struct {
 	Deleted       bool
 }
 
+type ChangeMetadata struct {
+	KeyRelation   Relation
+	CommitLSN     uint64
+	TransactionID uint32
+}
+
 type canonicalKV struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
@@ -81,6 +85,14 @@ type canonicalDefinition struct {
 	Subset   *canonicalSubset `json:"subset,omitempty"`
 }
 
+type persistedMessage struct {
+	Headers  map[string]any `json:"headers"`
+	Key      string         `json:"key,omitempty"`
+	Value    Row            `json:"value,omitempty"`
+	OldValue Row            `json:"old_value,omitempty"`
+	Offset   string         `json:"offset,omitempty"`
+}
+
 type Manager struct {
 	store      storage.Store
 	mu         sync.RWMutex
@@ -91,14 +103,18 @@ type Manager struct {
 	waiters    map[string][]chan struct{}
 }
 
-func NewManager(store storage.Store) *Manager {
-	return &Manager{
+func NewManager(store storage.Store) (*Manager, error) {
+	manager := &Manager{
 		store:      store,
 		byHandle:   map[string]State{},
 		byHash:     map[string]string{},
 		byRelation: map[string]map[string]struct{}{},
 		waiters:    map[string][]chan struct{}{},
 	}
+	if err := manager.loadPersisted(context.Background()); err != nil {
+		return nil, err
+	}
+	return manager, nil
 }
 
 var (
@@ -134,33 +150,42 @@ func (m *Manager) Canonicalize(def Definition) ([]byte, string) {
 	return bytes, hex.EncodeToString(sum[:])
 }
 
-func (m *Manager) UpsertSnapshot(def Definition, snapshot SnapshotResult) State {
+func (m *Manager) UpsertSnapshot(def Definition, snapshot SnapshotResult) (State, error) {
+	return m.UpsertSnapshotAtOffset(def, snapshot, InitialOffset)
+}
+
+func (m *Manager) UpsertSnapshotAtOffset(def Definition, snapshot SnapshotResult, currentOffset string) (State, error) {
 	_, hash := m.Canonicalize(def)
+	now := time.Now().UTC()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	now := time.Now().UTC()
-
 	if handle, ok := m.byHash[hash]; ok {
-		state := m.byHandle[handle]
-		m.removeRelationLocked(state.Definition.Relation, handle)
-		state.Definition = def
-		state.Schema = cloneSchema(snapshot.Schema)
-		state.Snapshot = buildSnapshotMessages(def, snapshot)
-		state.Changes = nil
-		state.Materialized = materializedRows(snapshot.Schema, snapshot.Rows)
-		state.CurrentOffset = InitialOffset
-		state.LastAccess = now
-		state.Deleted = false
-		m.byHandle[handle] = state
+		existing := m.byHandle[handle]
+		updated := existing
+		updated.Definition = def
+		updated.Schema = cloneSchema(snapshot.Schema)
+		updated.Snapshot = buildSnapshotMessages(def, snapshot)
+		updated.Changes = nil
+		updated.Materialized = materializedRows(snapshot.Schema, snapshot.Rows)
+		updated.CurrentOffset = currentOffset
+		updated.LastAccess = now
+		updated.Deleted = false
+		if err := m.persistStateLocked(updated); err != nil {
+			return State{}, err
+		}
+
+		m.removeRelationLocked(existing.Definition.Relation, handle)
+		m.byHandle[handle] = updated
+		m.byHash[hash] = handle
 		m.addRelationLocked(def.Relation, handle)
 		m.notifyLocked(handle)
-		return state
+		return updated, nil
 	}
 
 	m.generation++
-	handle := hash[:10] + "-" + strconv.FormatInt(time.Now().UnixMicro(), 10)
+	handle := hash[:10] + "-" + strconv.FormatInt(now.UnixMicro(), 10)
 	state := State{
 		Handle:        handle,
 		Hash:          hash,
@@ -168,18 +193,22 @@ func (m *Manager) UpsertSnapshot(def Definition, snapshot SnapshotResult) State 
 		Schema:        cloneSchema(snapshot.Schema),
 		Snapshot:      buildSnapshotMessages(def, snapshot),
 		Materialized:  materializedRows(snapshot.Schema, snapshot.Rows),
-		CurrentOffset: InitialOffset,
+		CurrentOffset: currentOffset,
 		LastAccess:    now,
 		Generation:    m.generation,
 	}
+	if err := m.persistStateLocked(state); err != nil {
+		m.generation--
+		return State{}, err
+	}
+
 	m.byHandle[handle] = state
 	m.byHash[hash] = handle
 	m.addRelationLocked(def.Relation, handle)
-
-	return state
+	return state, nil
 }
 
-func (m *Manager) LookupOrCreateDefinition(def Definition) State {
+func (m *Manager) LookupOrCreateDefinition(def Definition) (State, error) {
 	_, hash := m.Canonicalize(def)
 
 	m.mu.Lock()
@@ -188,14 +217,16 @@ func (m *Manager) LookupOrCreateDefinition(def Definition) State {
 	if handle, ok := m.byHash[hash]; ok {
 		state := m.byHandle[handle]
 		state.LastAccess = time.Now().UTC()
+		if err := m.persistStateLocked(state); err != nil {
+			return State{}, err
+		}
 		m.byHandle[handle] = state
-		return state
+		return state, nil
 	}
 
 	m.generation++
-	handle := hash[:10] + "-" + strconv.FormatInt(time.Now().UnixMicro(), 10)
 	state := State{
-		Handle:        handle,
+		Handle:        hash[:10] + "-" + strconv.FormatInt(time.Now().UnixMicro(), 10),
 		Hash:          hash,
 		Definition:    def,
 		Materialized:  map[string]Row{},
@@ -203,11 +234,15 @@ func (m *Manager) LookupOrCreateDefinition(def Definition) State {
 		LastAccess:    time.Now().UTC(),
 		Generation:    m.generation,
 	}
-	m.byHandle[handle] = state
-	m.byHash[hash] = handle
-	m.addRelationLocked(def.Relation, handle)
+	if err := m.persistStateLocked(state); err != nil {
+		m.generation--
+		return State{}, err
+	}
 
-	return state
+	m.byHandle[state.Handle] = state
+	m.byHash[hash] = state.Handle
+	m.addRelationLocked(def.Relation, state.Handle)
+	return state, nil
 }
 
 func (m *Manager) LookupByHandle(handle string) (State, bool) {
@@ -236,52 +271,108 @@ func (m *Manager) LookupByDefinition(def Definition) (State, bool) {
 	if !ok || state.Deleted {
 		return State{}, false
 	}
-
 	return state, true
 }
 
-func (m *Manager) Delete(handle string) bool {
+func (m *Manager) Delete(handle string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state, ok := m.byHandle[handle]
 	if !ok {
-		return false
+		return false, nil
+	}
+
+	updated := state
+	updated.Deleted = true
+	updated.LastAccess = time.Now().UTC()
+	if err := m.persistStateLocked(updated); err != nil {
+		return false, err
 	}
 
 	delete(m.byHash, state.Hash)
 	m.removeRelationLocked(state.Definition.Relation, handle)
-	state.Deleted = true
-	m.byHandle[handle] = state
+	m.byHandle[handle] = updated
 	m.notifyLocked(handle)
-	return true
+	return true, nil
 }
 
-func (m *Manager) InvalidateByRelation(relation Relation) []string {
+func (m *Manager) InvalidateByRelation(relation Relation) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	handles := m.byRelation[relationKey(relation)]
 	if len(handles) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	invalidated := make([]string, 0, len(handles))
+	sortedHandles := make([]string, 0, len(handles))
+	updatedStates := make(map[string]State, len(handles))
 	for handle := range handles {
+		sortedHandles = append(sortedHandles, handle)
+	}
+	sort.Strings(sortedHandles)
+
+	for _, handle := range sortedHandles {
 		state, ok := m.byHandle[handle]
 		if !ok || state.Deleted {
 			continue
 		}
+		updated := state
+		updated.Deleted = true
+		updated.LastAccess = time.Now().UTC()
+		if err := m.persistStateLocked(updated); err != nil {
+			return nil, err
+		}
+		updatedStates[handle] = updated
+	}
 
-		delete(m.byHash, state.Hash)
-		state.Deleted = true
-		m.byHandle[handle] = state
+	invalidated := make([]string, 0, len(updatedStates))
+	for _, handle := range sortedHandles {
+		updated, ok := updatedStates[handle]
+		if !ok {
+			continue
+		}
+		delete(m.byHash, updated.Hash)
+		m.byHandle[handle] = updated
 		invalidated = append(invalidated, handle)
 		m.notifyLocked(handle)
 	}
 	delete(m.byRelation, relationKey(relation))
-	sort.Strings(invalidated)
-	return invalidated
+	return invalidated, nil
+}
+
+func (m *Manager) InvalidateAll() ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	handles := make([]string, 0, len(m.byHandle))
+	for handle := range m.byHandle {
+		handles = append(handles, handle)
+	}
+	sort.Strings(handles)
+
+	invalidated := make([]string, 0, len(handles))
+	for _, handle := range handles {
+		state := m.byHandle[handle]
+		if state.Deleted {
+			continue
+		}
+
+		updated := state
+		updated.Deleted = true
+		updated.LastAccess = time.Now().UTC()
+		if err := m.persistStateLocked(updated); err != nil {
+			return invalidated, err
+		}
+
+		m.removeRelationLocked(state.Definition.Relation, handle)
+		delete(m.byHash, updated.Hash)
+		m.byHandle[handle] = updated
+		invalidated = append(invalidated, handle)
+		m.notifyLocked(handle)
+	}
+	return invalidated, nil
 }
 
 func (m *Manager) ActiveByRelation(relation Relation) []State {
@@ -305,7 +396,24 @@ func (m *Manager) ActiveByRelation(relation Relation) []State {
 	sort.Slice(states, func(i, j int) bool {
 		return states[i].Handle < states[j].Handle
 	})
+	return states
+}
 
+func (m *Manager) ActiveStates() []State {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	states := make([]State, 0, len(m.byHandle))
+	for _, state := range m.byHandle {
+		if state.Deleted {
+			continue
+		}
+		states = append(states, state)
+	}
+
+	sort.Slice(states, func(i, j int) bool {
+		return states[i].Handle < states[j].Handle
+	})
 	return states
 }
 
@@ -360,19 +468,27 @@ func (m *Manager) Append(handle string, messages []Message) (State, error) {
 		return State{}, ErrShapeDeleted
 	}
 
-	sequence := offsetSequence(state.CurrentOffset)
-	for _, message := range messages {
-		sequence++
-		message.Offset = formatOffset(sequence)
-		state.Changes = append(state.Changes, message)
-		applyMessageToMaterialized(state.Materialized, message)
+	updated := state
+	updated.Materialized = cloneMaterialized(state.Materialized)
+	for index, message := range messages {
+		cloned := cloneMessage(message)
+		if cloned.Offset == "" {
+			cloned.Offset = NextGeneratedOffset(updated.CurrentOffset, index)
+		}
+		updated.Changes = append(updated.Changes, cloned)
+		applyMessageToMaterialized(updated.Materialized, cloned)
+		if CompareOffsets(cloned.Offset, updated.CurrentOffset) > 0 {
+			updated.CurrentOffset = cloned.Offset
+		}
 	}
-	state.CurrentOffset = formatOffset(sequence)
-	state.LastAccess = time.Now().UTC()
-	m.byHandle[handle] = state
-	m.notifyLocked(handle)
+	updated.LastAccess = time.Now().UTC()
+	if err := m.persistStateLocked(updated); err != nil {
+		return State{}, err
+	}
 
-	return state, nil
+	m.byHandle[handle] = updated
+	m.notifyLocked(handle)
+	return updated, nil
 }
 
 func (m *Manager) Refresh(handle string, snapshot SnapshotResult) (State, []Message, error) {
@@ -387,28 +503,95 @@ func (m *Manager) Refresh(handle string, snapshot SnapshotResult) (State, []Mess
 		return State{}, nil, ErrShapeDeleted
 	}
 
-	updatedMaterialized := materializedRows(snapshot.Schema, snapshot.Rows)
-	messages := diffRows(state.Definition, snapshot.Schema, state.Materialized, updatedMaterialized)
+	updated := state
+	updated.Schema = cloneSchema(snapshot.Schema)
+	updated.Materialized = materializedRows(snapshot.Schema, snapshot.Rows)
+	updated.LastAccess = time.Now().UTC()
 
-	state.Schema = cloneSchema(snapshot.Schema)
-	state.Materialized = updatedMaterialized
-	state.LastAccess = time.Now().UTC()
-
+	messages := diffRows(updated.Definition, snapshot.Schema, state.Materialized, updated.Materialized, updated.Definition.Relation)
 	if len(messages) > 0 {
-		sequence := offsetSequence(state.CurrentOffset)
+		updated.CurrentOffset = applyChangeOffsets(updated.CurrentOffset, messages, ChangeMetadata{})
 		for index := range messages {
-			sequence++
-			messages[index].Offset = formatOffset(sequence)
-			state.Changes = append(state.Changes, messages[index])
+			updated.Changes = append(updated.Changes, cloneMessage(messages[index]))
 		}
-		state.CurrentOffset = formatOffset(sequence)
-		m.byHandle[handle] = state
-		m.notifyLocked(handle)
-		return state, append([]Message(nil), messages...), nil
 	}
 
-	m.byHandle[handle] = state
-	return state, nil, nil
+	if err := m.persistStateLocked(updated); err != nil {
+		return State{}, nil, err
+	}
+
+	m.byHandle[handle] = updated
+	if len(messages) > 0 {
+		m.notifyLocked(handle)
+		return updated, cloneMessages(messages), nil
+	}
+	return updated, nil, nil
+}
+
+func (m *Manager) RefreshKeys(handle string, snapshot SnapshotResult, keyRows []Row) (State, []Message, error) {
+	return m.RefreshKeysWithMetadata(handle, snapshot, keyRows, ChangeMetadata{})
+}
+
+func (m *Manager) RefreshKeysWithMetadata(handle string, snapshot SnapshotResult, keyRows []Row, metadata ChangeMetadata) (State, []Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, ok := m.byHandle[handle]
+	if !ok {
+		return State{}, nil, ErrShapeNotFound
+	}
+	if state.Deleted {
+		return State{}, nil, ErrShapeDeleted
+	}
+
+	targetedKeys := targetedKeySet(snapshot.Schema, keyRows, snapshot.Rows)
+	if len(targetedKeys) == 0 {
+		return state, nil, nil
+	}
+
+	updated := state
+	updated.Schema = cloneSchema(snapshot.Schema)
+	updated.Materialized = cloneMaterialized(state.Materialized)
+	updated.LastAccess = time.Now().UTC()
+
+	currentRows := materializedRows(snapshot.Schema, snapshot.Rows)
+	for key := range targetedKeys {
+		delete(updated.Materialized, key)
+	}
+	for key, row := range currentRows {
+		if _, ok := targetedKeys[key]; ok {
+			updated.Materialized[key] = cloneRow(row)
+		}
+	}
+
+	previousTargeted := subsetRows(state.Materialized, targetedKeys)
+	currentTargeted := subsetRows(updated.Materialized, targetedKeys)
+	keyRelation := metadata.KeyRelation
+	if keyRelation == (Relation{}) {
+		keyRelation = updated.Definition.Relation
+	}
+
+	messages := diffRows(updated.Definition, snapshot.Schema, previousTargeted, currentTargeted, keyRelation)
+	if len(messages) > 0 {
+		if metadata.CommitLSN > 0 {
+			applyLiveWireFormat(snapshot.Schema, messages)
+		}
+		updated.CurrentOffset = applyChangeOffsets(updated.CurrentOffset, messages, metadata)
+		for index := range messages {
+			updated.Changes = append(updated.Changes, cloneMessage(messages[index]))
+		}
+	}
+
+	if err := m.persistStateLocked(updated); err != nil {
+		return State{}, nil, err
+	}
+
+	m.byHandle[handle] = updated
+	if len(messages) > 0 {
+		m.notifyLocked(handle)
+		return updated, cloneMessages(messages), nil
+	}
+	return updated, nil, nil
 }
 
 func (m *Manager) readLocked(handle string, offset string) (State, []Message, error) {
@@ -420,31 +603,24 @@ func (m *Manager) readLocked(handle string, offset string) (State, []Message, er
 		return state, nil, ErrShapeDeleted
 	}
 
-	requested := offsetSequence(offset)
-	current := offsetSequence(state.CurrentOffset)
-	if requested > current {
+	if _, ok := ParseOffset(offset); !ok {
 		return state, nil, ErrOffsetOutOfRange
 	}
-
-	if requested == current {
+	comparison := CompareOffsets(offset, state.CurrentOffset)
+	if comparison > 0 {
+		return state, nil, ErrOffsetOutOfRange
+	}
+	if comparison == 0 {
 		return state, nil, nil
 	}
 
-	if requested == 0 {
-		messages := append([]Message(nil), state.Changes...)
-		return state, messages, nil
+	filtered := make([]Message, 0, len(state.Changes))
+	for _, message := range state.Changes {
+		if CompareOffsets(message.Offset, offset) > 0 {
+			filtered = append(filtered, cloneMessage(message))
+		}
 	}
-
-	start := requested
-	if start < 0 {
-		start = 0
-	}
-	if start > len(state.Changes) {
-		return state, nil, ErrOffsetOutOfRange
-	}
-
-	messages := append([]Message(nil), state.Changes[start:]...)
-	return state, messages, nil
+	return state, filtered, nil
 }
 
 func (m *Manager) removeWaiter(handle string, waiter chan struct{}) {
@@ -475,6 +651,153 @@ func (m *Manager) notifyLocked(handle string) {
 	}
 }
 
+func (m *Manager) loadPersisted(ctx context.Context) error {
+	shapes, err := m.store.LoadShapes(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, persisted := range shapes {
+		state, err := unmarshalState(persisted)
+		if err != nil {
+			state = State{
+				Handle:        persisted.Handle,
+				Hash:          persisted.Hash,
+				CurrentOffset: persisted.CurrentOffset,
+				LastAccess:    persisted.LastAccess.UTC(),
+				Generation:    persisted.Generation,
+				Deleted:       true,
+			}
+			if err := m.persistStateLocked(state); err != nil {
+				return err
+			}
+		}
+		m.byHandle[state.Handle] = state
+		if !state.Deleted {
+			m.byHash[state.Hash] = state.Handle
+			m.addRelationLocked(state.Definition.Relation, state.Handle)
+		}
+		if state.Generation > m.generation {
+			m.generation = state.Generation
+		}
+	}
+	return nil
+}
+
+func (m *Manager) persistStateLocked(state State) error {
+	persisted, err := marshalState(state)
+	if err != nil {
+		return err
+	}
+	return m.store.SaveShape(context.Background(), persisted)
+}
+
+func marshalState(state State) (storage.PersistedShape, error) {
+	definition, err := json.Marshal(state.Definition)
+	if err != nil {
+		return storage.PersistedShape{}, err
+	}
+	schema, err := json.Marshal(state.Schema)
+	if err != nil {
+		return storage.PersistedShape{}, err
+	}
+	snapshot, err := json.Marshal(state.Snapshot)
+	if err != nil {
+		return storage.PersistedShape{}, err
+	}
+	materialized, err := json.Marshal(state.Materialized)
+	if err != nil {
+		return storage.PersistedShape{}, err
+	}
+
+	changes := make([]json.RawMessage, 0, len(state.Changes))
+	for _, change := range state.Changes {
+		encoded, err := json.Marshal(persistedMessage{
+			Headers:  change.Headers,
+			Key:      change.Key,
+			Value:    change.Value,
+			OldValue: change.OldValue,
+			Offset:   change.Offset,
+		})
+		if err != nil {
+			return storage.PersistedShape{}, err
+		}
+		changes = append(changes, encoded)
+	}
+
+	return storage.PersistedShape{
+		Handle:        state.Handle,
+		Hash:          state.Hash,
+		Definition:    definition,
+		Schema:        schema,
+		Snapshot:      snapshot,
+		Materialized:  materialized,
+		CurrentOffset: state.CurrentOffset,
+		LastAccess:    state.LastAccess.UTC(),
+		Generation:    state.Generation,
+		Deleted:       state.Deleted,
+		Changes:       changes,
+	}, nil
+}
+
+func unmarshalState(persisted storage.PersistedShape) (State, error) {
+	var (
+		definition   Definition
+		schema       map[string]ColumnSchema
+		snapshot     []Message
+		materialized map[string]Row
+		changes      []Message
+	)
+
+	if len(persisted.Definition) > 0 {
+		if err := json.Unmarshal(persisted.Definition, &definition); err != nil {
+			return State{}, err
+		}
+	}
+	if len(persisted.Schema) > 0 {
+		if err := json.Unmarshal(persisted.Schema, &schema); err != nil {
+			return State{}, err
+		}
+	}
+	if len(persisted.Snapshot) > 0 {
+		if err := json.Unmarshal(persisted.Snapshot, &snapshot); err != nil {
+			return State{}, err
+		}
+	}
+	if len(persisted.Materialized) > 0 {
+		if err := json.Unmarshal(persisted.Materialized, &materialized); err != nil {
+			return State{}, err
+		}
+	}
+	for _, raw := range persisted.Changes {
+		var message persistedMessage
+		if err := json.Unmarshal(raw, &message); err != nil {
+			return State{}, err
+		}
+		changes = append(changes, Message{
+			Headers:  message.Headers,
+			Key:      message.Key,
+			Value:    message.Value,
+			OldValue: message.OldValue,
+			Offset:   message.Offset,
+		})
+	}
+
+	return State{
+		Handle:        persisted.Handle,
+		Hash:          persisted.Hash,
+		Definition:    definition,
+		Schema:        schema,
+		Snapshot:      snapshot,
+		Changes:       changes,
+		Materialized:  materialized,
+		CurrentOffset: persisted.CurrentOffset,
+		LastAccess:    persisted.LastAccess.UTC(),
+		Generation:    persisted.Generation,
+		Deleted:       persisted.Deleted,
+	}, nil
+}
+
 func buildSnapshotMessages(def Definition, snapshot SnapshotResult) []Message {
 	if def.Log == "changes_only" {
 		return nil
@@ -482,25 +805,29 @@ func buildSnapshotMessages(def Definition, snapshot SnapshotResult) []Message {
 
 	messages := make([]Message, 0, len(snapshot.Rows))
 	for _, row := range snapshot.Rows {
+		internalKey := PrimaryKeySignature(snapshot.Schema, row)
 		messages = append(messages, Message{
-			Headers: map[string]any{"operation": "insert"},
-			Key:     primaryKeyForRow(snapshot.Schema, row),
-			Value:   cloneRow(row),
+			Headers: map[string]any{
+				"operation": "insert",
+				"relation":  RelationHeader(def.Relation),
+			},
+			Key:         MessageKey(def.Relation, snapshot.Schema, row),
+			Value:       cloneRow(row),
+			InternalKey: internalKey,
 		})
 	}
-
 	return messages
 }
 
 func materializedRows(schema map[string]ColumnSchema, rows []Row) map[string]Row {
 	result := make(map[string]Row, len(rows))
 	for _, row := range rows {
-		result[primaryKeyForRow(schema, row)] = cloneRow(row)
+		result[PrimaryKeySignature(schema, row)] = cloneRow(row)
 	}
 	return result
 }
 
-func diffRows(def Definition, schema map[string]ColumnSchema, previous map[string]Row, current map[string]Row) []Message {
+func diffRows(def Definition, schema map[string]ColumnSchema, previous map[string]Row, current map[string]Row, keyRelation Relation) []Message {
 	keys := make([]string, 0, len(previous)+len(current))
 	seen := map[string]struct{}{}
 	for key := range previous {
@@ -523,15 +850,23 @@ func diffRows(def Definition, schema map[string]ColumnSchema, previous map[strin
 		switch {
 		case !hadOld && hasNew:
 			messages = append(messages, Message{
-				Headers: map[string]any{"operation": "insert"},
-				Key:     key,
-				Value:   cloneRow(newRow),
+				Headers: map[string]any{
+					"operation": "insert",
+					"relation":  RelationHeader(def.Relation),
+				},
+				Key:         MessageKey(keyRelation, schema, newRow),
+				Value:       cloneRow(newRow),
+				InternalKey: key,
 			})
 		case hadOld && !hasNew:
 			messages = append(messages, Message{
-				Headers: map[string]any{"operation": "delete"},
-				Key:     key,
-				Value:   deleteValue(def, schema, oldRow),
+				Headers: map[string]any{
+					"operation": "delete",
+					"relation":  RelationHeader(def.Relation),
+				},
+				Key:         MessageKey(keyRelation, schema, oldRow),
+				Value:       deleteValue(def, schema, oldRow),
+				InternalKey: key,
 			})
 		case hadOld && hasNew && !reflect.DeepEqual(oldRow, newRow):
 			value, oldValue, changed := updateValues(def, schema, oldRow, newRow)
@@ -540,9 +875,13 @@ func diffRows(def Definition, schema map[string]ColumnSchema, previous map[strin
 			}
 
 			message := Message{
-				Headers: map[string]any{"operation": "update"},
-				Key:     key,
-				Value:   value,
+				Headers: map[string]any{
+					"operation": "update",
+					"relation":  RelationHeader(def.Relation),
+				},
+				Key:         MessageKey(keyRelation, schema, newRow),
+				Value:       value,
+				InternalKey: key,
 			}
 			if len(oldValue) > 0 {
 				message.OldValue = oldValue
@@ -550,7 +889,6 @@ func diffRows(def Definition, schema map[string]ColumnSchema, previous map[strin
 			messages = append(messages, message)
 		}
 	}
-
 	return messages
 }
 
@@ -613,11 +951,15 @@ func applyMessageToMaterialized(materialized map[string]Row, message Message) {
 	}
 
 	operation, _ := message.Headers["operation"].(string)
+	key := message.InternalKey
+	if key == "" {
+		key = message.Key
+	}
 	switch operation {
 	case "delete":
-		delete(materialized, message.Key)
+		delete(materialized, key)
 	case "insert", "update":
-		materialized[message.Key] = cloneRow(message.Value)
+		materialized[key] = cloneRow(message.Value)
 	}
 }
 
@@ -645,6 +987,72 @@ func cloneRow(row Row) Row {
 	return cloned
 }
 
+func cloneMaterialized(materialized map[string]Row) map[string]Row {
+	if len(materialized) == 0 {
+		return map[string]Row{}
+	}
+
+	cloned := make(map[string]Row, len(materialized))
+	for key, row := range materialized {
+		cloned[key] = cloneRow(row)
+	}
+	return cloned
+}
+
+func cloneMessage(message Message) Message {
+	cloned := Message{
+		Headers:     map[string]any{},
+		Key:         message.Key,
+		Value:       cloneRow(message.Value),
+		OldValue:    cloneRow(message.OldValue),
+		Offset:      message.Offset,
+		InternalKey: message.InternalKey,
+	}
+	for key, value := range message.Headers {
+		cloned.Headers[key] = value
+	}
+	return cloned
+}
+
+func cloneMessages(messages []Message) []Message {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	cloned := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		cloned = append(cloned, cloneMessage(message))
+	}
+	return cloned
+}
+
+func targetedKeySet(schema map[string]ColumnSchema, keyRows []Row, rows []Row) map[string]struct{} {
+	targeted := map[string]struct{}{}
+	for _, row := range keyRows {
+		key := PrimaryKeySignature(schema, row)
+		if key != "" {
+			targeted[key] = struct{}{}
+		}
+	}
+	for _, row := range rows {
+		key := PrimaryKeySignature(schema, row)
+		if key != "" {
+			targeted[key] = struct{}{}
+		}
+	}
+	return targeted
+}
+
+func subsetRows(rows map[string]Row, keys map[string]struct{}) map[string]Row {
+	subset := map[string]Row{}
+	for key := range keys {
+		if row, ok := rows[key]; ok {
+			subset[key] = cloneRow(row)
+		}
+	}
+	return subset
+}
+
 func relationKey(relation Relation) string {
 	return relation.Schema + "." + relation.Table
 }
@@ -670,39 +1078,7 @@ func (m *Manager) removeRelationLocked(relation Relation, handle string) {
 }
 
 func primaryKeyForRow(schema map[string]ColumnSchema, row Row) string {
-	type pair struct {
-		index int
-		value string
-	}
-
-	pairs := make([]pair, 0, len(schema))
-	for name, column := range schema {
-		if column.PKIndex == nil {
-			continue
-		}
-
-		value := ""
-		if raw, ok := row[name]; ok && raw != nil {
-			value = fmt.Sprint(raw)
-		}
-
-		pairs = append(pairs, pair{index: *column.PKIndex, value: value})
-	}
-
-	sort.Slice(pairs, func(i, j int) bool {
-		return pairs[i].index < pairs[j].index
-	})
-
-	if len(pairs) == 0 {
-		return ""
-	}
-
-	values := make([]string, 0, len(pairs))
-	for _, pair := range pairs {
-		values = append(values, pair.value)
-	}
-
-	return strings.Join(values, ",")
+	return PrimaryKeySignature(schema, row)
 }
 
 func canonicalizeMap(values map[string]string) []canonicalKV {
@@ -720,7 +1096,6 @@ func canonicalizeMap(values map[string]string) []canonicalKV {
 	for _, key := range keys {
 		items = append(items, canonicalKV{Key: key, Value: values[key]})
 	}
-
 	return items
 }
 
@@ -734,24 +1109,55 @@ func canonicalizeStrings(values []string) []string {
 	return cloned
 }
 
-func offsetSequence(offset string) int {
-	if offset == "" || offset == InitialOffset {
-		return 0
+func applyChangeOffsets(currentOffset string, messages []Message, metadata ChangeMetadata) string {
+	for index := range messages {
+		if metadata.CommitLSN > 0 {
+			lsn := strconv.FormatUint(metadata.CommitLSN, 10)
+			messages[index].Offset = FormatLSNOffset(metadata.CommitLSN, index)
+			messages[index].Headers["lsn"] = lsn
+			messages[index].Headers["op_position"] = index
+			messages[index].Headers["txids"] = []uint32{metadata.TransactionID}
+		} else if messages[index].Offset == "" {
+			messages[index].Offset = NextGeneratedOffset(currentOffset, index)
+		}
 	}
-	parts := strings.SplitN(offset, "_", 2)
-	if len(parts) != 2 {
-		return 0
+
+	if len(messages) == 0 {
+		return currentOffset
 	}
-	if parts[1] == "inf" {
-		return int(^uint(0) >> 1)
+	if metadata.CommitLSN > 0 {
+		messages[len(messages)-1].Headers["last"] = true
 	}
-	value, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0
-	}
-	return value
+	return messages[len(messages)-1].Offset
 }
 
-func formatOffset(sequence int) string {
-	return "0_" + strconv.Itoa(sequence)
+func applyLiveWireFormat(schema map[string]ColumnSchema, messages []Message) {
+	for index := range messages {
+		applyLiveWireFormatRow(schema, messages[index].Value)
+		applyLiveWireFormatRow(schema, messages[index].OldValue)
+	}
+}
+
+func applyLiveWireFormatRow(schema map[string]ColumnSchema, row Row) {
+	if len(row) == 0 {
+		return
+	}
+
+	for name, value := range row {
+		column, ok := schema[name]
+		if !ok || column.Type != "bool" || value == nil {
+			continue
+		}
+
+		asString, ok := value.(string)
+		if !ok {
+			continue
+		}
+		switch asString {
+		case "true":
+			row[name] = "t"
+		case "false":
+			row[name] = "f"
+		}
+	}
 }

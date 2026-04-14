@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/petrbrazdil/pulsesync/internal/config"
 	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/petrbrazdil/pulsesync/internal/storage"
 )
 
 type ServiceStatus string
@@ -38,16 +40,24 @@ type Runtime struct {
 	queryPool         *pgxpool.Pool
 	systemIdentity    pglogrepl.IdentifySystemResult
 	shapes            *shapes.Manager
+	store             storage.Store
+	replicationSlot   string
 	replicationConn   *pgconn.PgConn
 	replicationCancel context.CancelFunc
 	replicationWG     sync.WaitGroup
+	runCtx            context.Context
+	runCancel         context.CancelFunc
+	runWG             sync.WaitGroup
+	relationCache     map[uint32]relationMetadata
 }
 
-func NewRuntime(cfg config.Config, manager *shapes.Manager) *Runtime {
+func NewRuntime(cfg config.Config, manager *shapes.Manager, store storage.Store) *Runtime {
 	return &Runtime{
-		cfg:    cfg,
-		status: StatusStarting,
-		shapes: manager,
+		cfg:           cfg,
+		status:        StatusStarting,
+		shapes:        manager,
+		store:         store,
+		relationCache: map[uint32]relationMetadata{},
 	}
 }
 
@@ -60,9 +70,23 @@ func (r *Runtime) Start(context.Context) error {
 	poolConfig.MaxConns = int32(r.cfg.DBPoolSize)
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.queryPoolConfig = poolConfig
-	r.status = StatusActive
+	if r.runCtx == nil {
+		r.runCtx, r.runCancel = context.WithCancel(context.Background())
+	}
+	r.status = StatusStarting
+	runCtx := r.runCtx
+	r.mu.Unlock()
+
+	if err := r.connectRuntime(runCtx); err != nil {
+		r.setStatus(StatusWaiting)
+	}
+
+	r.runWG.Add(1)
+	go func() {
+		defer r.runWG.Done()
+		r.superviseRuntime(runCtx)
+	}()
 
 	return nil
 }
@@ -76,17 +100,27 @@ func (r *Runtime) Status() ServiceStatus {
 
 func (r *Runtime) Close(context.Context) error {
 	r.mu.Lock()
+	if r.runCancel != nil {
+		r.runCancel()
+		r.runCancel = nil
+	}
 	if r.replicationCancel != nil {
 		r.replicationCancel()
 		r.replicationCancel = nil
 	}
 	replConn := r.replicationConn
 	r.replicationConn = nil
+	r.replicationSlot = ""
+	runCtx := r.runCtx
+	r.runCtx = nil
 	r.mu.Unlock()
 	if replConn != nil {
 		_ = replConn.Close(context.Background())
 	}
 	r.replicationWG.Wait()
+	if runCtx != nil {
+		r.runWG.Wait()
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -116,10 +150,11 @@ func (r *Runtime) Snapshot(ctx context.Context, request shapes.SnapshotRequest) 
 	result := shapes.SnapshotResult{
 		Schema: map[string]shapes.ColumnSchema{},
 	}
-
-	for _, column := range columns {
+	selectedColumns := projectedColumns(columns, request.Definition.Columns)
+	for _, column := range selectedColumns {
 		result.Schema[column.Name] = shapes.ColumnSchema{
 			Type:    column.Type,
+			NotNull: column.NotNull,
 			PKIndex: column.PKIndex,
 		}
 	}
@@ -128,7 +163,6 @@ func (r *Runtime) Snapshot(ctx context.Context, request shapes.SnapshotRequest) 
 		return result, nil
 	}
 
-	selectedColumns := projectedColumns(columns, request.Definition.Columns)
 	query, args := buildSnapshotQuery(request.Definition, selectedColumns)
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -179,9 +213,11 @@ func (r *Runtime) snapshotWithMetadata(ctx context.Context, pool *pgxpool.Pool, 
 	result := shapes.SnapshotResult{
 		Schema: map[string]shapes.ColumnSchema{},
 	}
-	for _, column := range columns {
+	selectedColumns := projectedColumns(columns, request.Definition.Columns)
+	for _, column := range selectedColumns {
 		result.Schema[column.Name] = shapes.ColumnSchema{
 			Type:    column.Type,
+			NotNull: column.NotNull,
 			PKIndex: column.PKIndex,
 		}
 	}
@@ -199,7 +235,6 @@ func (r *Runtime) snapshotWithMetadata(ctx context.Context, pool *pgxpool.Pool, 
 		return result, nil
 	}
 
-	selectedColumns := projectedColumns(columns, request.Definition.Columns)
 	query, args := buildSnapshotQuery(request.Definition, selectedColumns)
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
@@ -275,16 +310,60 @@ func (r *Runtime) ensurePool(ctx context.Context) (*pgxpool.Pool, error) {
 	}
 	queryPool := r.queryPool
 	r.mu.Unlock()
-
-	if err := r.ensureReplication(context.Background()); err != nil {
-		return nil, err
-	}
 	return queryPool, nil
+}
+
+func (r *Runtime) connectRuntime(ctx context.Context) error {
+	if _, err := r.ensurePool(ctx); err != nil {
+		return err
+	}
+	if err := r.ensureReplication(ctx); err != nil {
+		return err
+	}
+	r.setStatus(StatusActive)
+	return nil
+}
+
+func (r *Runtime) superviseRuntime(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if r.hasReplicationConnection() {
+				continue
+			}
+			if err := r.connectRuntime(ctx); err != nil {
+				r.setStatus(StatusWaiting)
+			}
+		}
+	}
+}
+
+func (r *Runtime) hasReplicationConnection() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.replicationConn != nil
+}
+
+func (r *Runtime) setStatus(status ServiceStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.status == StatusStopped {
+		return
+	}
+	r.status = status
 }
 
 type describedColumn struct {
 	Name    string
 	Type    string
+	NotNull bool
 	PKIndex *int
 }
 
@@ -292,15 +371,21 @@ func describeRelation(ctx context.Context, pool relationQueryer, relation shapes
 	const query = `
 SELECT
 	a.attname,
-	format_type(a.atttypid, a.atttypmod) AS type_name,
-	CASE
-		WHEN i.indisprimary THEN array_position(i.indkey::smallint[], a.attnum) - 1
-		ELSE NULL
-	END AS pk_index
+	COALESCE(NULLIF(base_type.typname, ''), typ.typname) AS type_name,
+	a.attnotnull,
+	pk.pk_index
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+JOIN pg_type typ ON typ.oid = a.atttypid
+LEFT JOIN pg_type base_type ON base_type.oid = typ.typbasetype
 LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
+LEFT JOIN LATERAL (
+	SELECT key.ordinality - 1 AS pk_index
+	FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+	WHERE key.attnum = a.attnum
+	LIMIT 1
+) pk ON true
 WHERE n.nspname = $1 AND c.relname = $2
 ORDER BY a.attnum`
 
@@ -315,12 +400,13 @@ ORDER BY a.attnum`
 		var (
 			name     string
 			typeName string
+			notNull  bool
 			pkIndex  *int
 		)
-		if err := rows.Scan(&name, &typeName, &pkIndex); err != nil {
+		if err := rows.Scan(&name, &typeName, &notNull, &pkIndex); err != nil {
 			return nil, err
 		}
-		columns = append(columns, describedColumn{Name: name, Type: typeName, PKIndex: pkIndex})
+		columns = append(columns, describedColumn{Name: name, Type: typeName, NotNull: notNull, PKIndex: pkIndex})
 	}
 
 	if len(columns) == 0 {
@@ -331,13 +417,14 @@ ORDER BY a.attnum`
 }
 
 func loadSnapshotMetadata(ctx context.Context, tx pgx.Tx) (*shapes.SnapshotMetadata, error) {
-	var snapshotText string
-	if err := tx.QueryRow(ctx, "SELECT txid_current_snapshot()::text").Scan(&snapshotText); err != nil {
-		return nil, err
-	}
-
-	var databaseLSN string
-	if err := tx.QueryRow(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&databaseLSN); err != nil {
+	var (
+		snapshotText string
+		databaseLSN  string
+	)
+	if err := tx.QueryRow(
+		ctx,
+		"SELECT txid_current_snapshot()::text, pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')::bigint::text",
+	).Scan(&snapshotText, &databaseLSN); err != nil {
 		return nil, err
 	}
 
@@ -360,6 +447,8 @@ func parseSnapshotText(value string) (string, string, []string) {
 	var xipList []string
 	if len(parts) == 3 && strings.TrimSpace(parts[2]) != "" {
 		xipList = strings.Split(parts[2], ",")
+	} else {
+		xipList = []string{}
 	}
 	return parts[0], parts[1], xipList
 }

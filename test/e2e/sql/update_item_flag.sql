@@ -1,0 +1,3 @@
+UPDATE item_flags
+SET enabled = TRUE
+WHERE item_id = '00000000-0000-0000-0000-000000000002';

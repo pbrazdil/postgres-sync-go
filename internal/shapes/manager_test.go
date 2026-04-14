@@ -9,7 +9,10 @@ import (
 func TestManagerChangesOnlyRefreshProducesUpdate(t *testing.T) {
 	t.Parallel()
 
-	manager := NewManager(storage.NewMemoryStore())
+	manager, err := NewManager(storage.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
 	definition := Definition{
 		Relation: Relation{Schema: "public", Table: "items"},
 		Log:      "changes_only",
@@ -25,7 +28,10 @@ func TestManagerChangesOnlyRefreshProducesUpdate(t *testing.T) {
 		},
 	}
 
-	state := manager.UpsertSnapshot(definition, initial)
+	state, err := manager.UpsertSnapshot(definition, initial)
+	if err != nil {
+		t.Fatalf("UpsertSnapshot() error = %v", err)
+	}
 	if len(state.Snapshot) != 0 {
 		t.Fatalf("Snapshot length = %d, want 0", len(state.Snapshot))
 	}
@@ -65,7 +71,10 @@ func TestManagerChangesOnlyRefreshProducesUpdate(t *testing.T) {
 func TestManagerRefreshFullReplicaDiffsRows(t *testing.T) {
 	t.Parallel()
 
-	manager := NewManager(storage.NewMemoryStore())
+	manager, err := NewManager(storage.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
 	definition := Definition{
 		Relation: Relation{Schema: "public", Table: "items"},
 		Replica:  "full",
@@ -82,7 +91,10 @@ func TestManagerRefreshFullReplicaDiffsRows(t *testing.T) {
 		},
 	}
 
-	state := manager.UpsertSnapshot(definition, initial)
+	state, err := manager.UpsertSnapshot(definition, initial)
+	if err != nil {
+		t.Fatalf("UpsertSnapshot() error = %v", err)
+	}
 	updated := SnapshotResult{
 		Schema: initial.Schema,
 		Rows: []Row{
@@ -117,19 +129,28 @@ func TestManagerRefreshFullReplicaDiffsRows(t *testing.T) {
 func TestManagerInvalidateByRelation(t *testing.T) {
 	t.Parallel()
 
-	manager := NewManager(storage.NewMemoryStore())
+	manager, err := NewManager(storage.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
 	definition := Definition{
 		Relation: Relation{Schema: "public", Table: "items"},
 	}
 
-	state := manager.UpsertSnapshot(definition, SnapshotResult{
+	state, err := manager.UpsertSnapshot(definition, SnapshotResult{
 		Schema: map[string]ColumnSchema{
 			"id": {Type: "uuid", PKIndex: intPtr(0)},
 		},
 		Rows: []Row{{"id": "1"}},
 	})
+	if err != nil {
+		t.Fatalf("UpsertSnapshot() error = %v", err)
+	}
 
-	invalidated := manager.InvalidateByRelation(definition.Relation)
+	invalidated, err := manager.InvalidateByRelation(definition.Relation)
+	if err != nil {
+		t.Fatalf("InvalidateByRelation() error = %v", err)
+	}
 	if len(invalidated) != 1 || invalidated[0] != state.Handle {
 		t.Fatalf("invalidated = %+v", invalidated)
 	}
