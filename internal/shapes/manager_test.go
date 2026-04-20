@@ -197,6 +197,67 @@ func TestManagerDependentRefreshProducesMoveEvents(t *testing.T) {
 	}
 }
 
+func TestManagerDependentRefreshTagsComplexBooleanSubquery(t *testing.T) {
+	t.Parallel()
+
+	manager, err := NewManager(storage.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	definition := Definition{
+		Relation: Relation{Schema: "public", Table: "items"},
+		Where: `
+(id IN (SELECT item_id FROM item_flags WHERE enabled = true) OR priority >= 10)
+AND NOT EXISTS (
+	SELECT 1
+	FROM item_blocks
+	WHERE item_blocks.item_id = items.id
+)`,
+	}
+
+	initial := SnapshotResult{
+		Schema: map[string]ColumnSchema{
+			"id":    {Type: "uuid", PKIndex: intPtr(0)},
+			"value": {Type: "text"},
+		},
+		Rows: []Row{
+			{"id": "1", "value": "blocked-after-change"},
+		},
+	}
+
+	state, err := manager.UpsertSnapshot(definition, initial)
+	if err != nil {
+		t.Fatalf("UpsertSnapshot() error = %v", err)
+	}
+	if tags, ok := state.Snapshot[0].Headers["tags"].([]string); !ok || len(tags) != 1 {
+		t.Fatalf("snapshot tags = %+v", state.Snapshot[0].Headers["tags"])
+	}
+
+	state, messages, err := manager.RefreshWithMetadata(state.Handle, SnapshotResult{
+		Schema: initial.Schema,
+		Rows:   nil,
+	}, ChangeMetadata{
+		KeyRelation:      Relation{Schema: "public", Table: "item_blocks"},
+		CommitLSN:        99,
+		TransactionID:    11,
+		DependentRefresh: true,
+	})
+	if err != nil {
+		t.Fatalf("RefreshWithMetadata() error = %v", err)
+	}
+
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1: %+v", len(messages), messages)
+	}
+	if messages[0].Headers["event"] != "move-out" {
+		t.Fatalf("message = %+v", messages[0])
+	}
+	if len(state.Materialized) != 0 {
+		t.Fatalf("materialized rows = %+v, want empty", state.Materialized)
+	}
+}
+
 func TestManagerInvalidateByRelation(t *testing.T) {
 	t.Parallel()
 
