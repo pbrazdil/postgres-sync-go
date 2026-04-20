@@ -28,7 +28,7 @@ main() {
   require_cmd docker
   configure_one_off_docker_ports
 
-  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$ELECTRIC_PORT"
+  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
   log "using compose project: $COMPOSE_PROJECT_NAME"
 
   compose_cmd up -d postgres >/dev/null
@@ -38,7 +38,7 @@ main() {
 
   compose_cmd up -d --build pulsesync electric >/dev/null
   wait_for_active_health "http://127.0.0.1:${PULSE_PORT}/v1/health"
-  wait_for_active_health "http://127.0.0.1:${ELECTRIC_PORT}/v1/health"
+  wait_for_active_health "http://127.0.0.1:${COMPARE_PORT}/v1/health"
   capture_pg_debug "$PARALLEL_DIR/db-after-start"
 
   cat <<EOF
@@ -50,8 +50,8 @@ PulseSync:
   health:   http://127.0.0.1:${PULSE_PORT}/v1/health
 
 Electric:
-  base url: http://127.0.0.1:${ELECTRIC_PORT}
-  health:   http://127.0.0.1:${ELECTRIC_PORT}/v1/health
+  base url: http://127.0.0.1:${COMPARE_PORT}
+  health:   http://127.0.0.1:${COMPARE_PORT}/v1/health
 
 Manual curl helper:
   $SCRIPT_DIR/manual_curls.sh
