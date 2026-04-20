@@ -1034,6 +1034,71 @@ func TestServiceOverloadRejectsExistingRequests(t *testing.T) {
 	})
 }
 
+func TestServiceAdmissionClassifiesUnknownHandleAsInitial(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{
+		snapshotFunc: func(context.Context, shapes.SnapshotRequest) (shapes.SnapshotResult, error) {
+			t.Fatal("snapshot backend should not be called when initial admission is saturated")
+			return shapes.SnapshotResult{}, nil
+		},
+	})
+	service.cfg.MaxConcurrentRequests.Initial = 0
+	service.cfg.MaxConcurrentRequests.Existing = 10
+	service.admission = newAdmissionController(0, 10)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=0_0&handle=stale-handle&secret=test-secret", nil)
+	service.HandleShape(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if body["message"] != "Concurrent initial request limit exceeded (limit: 0), please retry" {
+		t.Fatalf("message = %v", body["message"])
+	}
+}
+
+func TestServiceAdmissionClassifiesKnownDefinitionAsExisting(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{
+		snapshot: shapes.SnapshotResult{
+			Schema: map[string]shapes.ColumnSchema{
+				"id": {Type: "uuid", PKIndex: intPtr(0)},
+			},
+			Rows: []shapes.Row{
+				{"id": "1"},
+			},
+		},
+	})
+
+	initial := httptest.NewRecorder()
+	service.HandleShape(initial, httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&secret=test-secret", nil))
+	if initial.Code != http.StatusOK {
+		t.Fatalf("initial status = %d, want 200", initial.Code)
+	}
+
+	service.cfg.MaxConcurrentRequests.Initial = 0
+	service.cfg.MaxConcurrentRequests.Existing = 10
+	service.admission = newAdmissionController(0, 10)
+
+	rec := httptest.NewRecorder()
+	service.HandleShape(rec, httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&secret=test-secret", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("electric-handle") != initial.Header().Get("electric-handle") {
+		t.Fatalf("electric-handle = %q, want existing %q", rec.Header().Get("electric-handle"), initial.Header().Get("electric-handle"))
+	}
+}
+
 type stubBackend struct {
 	snapshot     shapes.SnapshotResult
 	snapshotErr  error

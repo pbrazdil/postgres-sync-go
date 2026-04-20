@@ -5,6 +5,13 @@ type admissionController struct {
 	existing chan struct{}
 }
 
+type admissionKind string
+
+const (
+	admissionInitial  admissionKind = "initial"
+	admissionExisting admissionKind = "existing"
+)
+
 func newAdmissionController(cfgLimits int, existingLimits int) *admissionController {
 	return &admissionController{
 		initial:  make(chan struct{}, cfgLimits),
@@ -12,13 +19,13 @@ func newAdmissionController(cfgLimits int, existingLimits int) *admissionControl
 	}
 }
 
-func (a *admissionController) acquire(req ShapeRequest) (func(), bool) {
+func (a *admissionController) acquire(kind admissionKind) (func(), bool) {
 	if a == nil {
 		return func() {}, true
 	}
 
 	target := a.existing
-	if req.Offset == "-1" || req.Offset == "now" || req.Handle == "" {
+	if kind == admissionInitial {
 		target = a.initial
 	}
 

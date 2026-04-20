@@ -70,11 +70,9 @@ func WriteOverloaded(w http.ResponseWriter) {
 	})
 }
 
-func WriteOverloadedWithRequest(w http.ResponseWriter, req ShapeRequest, limits config.MaxConcurrentRequests) {
-	kind := "existing"
+func WriteOverloadedWithKind(w http.ResponseWriter, kind admissionKind, limits config.MaxConcurrentRequests) {
 	limit := limits.Existing
-	if req.Offset == "-1" || req.Offset == "now" || req.Handle == "" {
-		kind = "initial"
+	if kind == admissionInitial {
 		limit = limits.Initial
 	}
 

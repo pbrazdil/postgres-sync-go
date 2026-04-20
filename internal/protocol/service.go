@@ -81,9 +81,10 @@ func (s *Service) HandleShape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	release, ok := s.admission.acquire(request)
+	admissionKind := s.admissionKind(request, definition)
+	release, ok := s.admission.acquire(admissionKind)
 	if !ok {
-		WriteOverloadedWithRequest(w, request, s.cfg.MaxConcurrentRequests)
+		WriteOverloadedWithKind(w, admissionKind, s.cfg.MaxConcurrentRequests)
 		return
 	}
 	defer release()
@@ -126,6 +127,23 @@ func (s *Service) validateFeatureFlags(req ShapeRequest) ValidationErrors {
 
 func requestContainsDependencyKeyword(req ShapeRequest) bool {
 	return sqlinspect.ContainsDependencyKeyword(req.Where)
+}
+
+func (s *Service) admissionKind(req ShapeRequest, def shapes.Definition) admissionKind {
+	if req.Handle != "" {
+		if state, ok := s.shapes.LookupByHandle(req.Handle); ok && sameShapeDefinition(s.shapes, state, def) {
+			return admissionExisting
+		}
+	}
+	if _, ok := s.shapes.LookupByDefinition(def); ok {
+		return admissionExisting
+	}
+	return admissionInitial
+}
+
+func sameShapeDefinition(manager *shapes.Manager, state shapes.State, def shapes.Definition) bool {
+	_, hash := manager.Canonicalize(def)
+	return state.Hash == hash
 }
 
 func (s *Service) serveInitialSnapshot(w http.ResponseWriter, r *http.Request, req ShapeRequest, def shapes.Definition) {
