@@ -1,4 +1,4 @@
-# PulseSync Agent Map
+# postgres-sync-go Agent Map
 
 This file is the short map for agents working in this repository. Keep durable knowledge in `docs/` and executable harnesses in `scripts/` or `test/e2e/`.
 
@@ -8,13 +8,14 @@ This file is the short map for agents working in this repository. Keep durable k
 - `ARCHITECTURE.md`: package codemap, core flows, boundaries, and invariants.
 - `docs/HARNESS_ENGINEERING.md`: agent workflow, validation loops, and artifact rules.
 - `docs/QUALITY.md`: quality gates by change type and current risk map.
+- `docs/legal/attribution-audit.md`: release license and attribution posture.
 - `docs/tech-debt-tracker.md`: prioritized cleanup and parity backlog.
 - `test/e2e/README.md`: protocol comparison harness.
 
 ## Hard Boundaries
 
 - Do not edit ignored/generated assets unless the user explicitly asks.
-- Keep the public Go API in `pkg/pulsesync` stable unless the user explicitly asks for an API change.
+- Keep the public Go API in `pkg/pgsync` stable unless the user explicitly asks for an API change.
 - Keep Electric-compatible HTTP behavior in `internal/protocol` and `internal/httpapi`; do not leak HTTP details into `internal/pg`.
 - Keep Postgres/runtime concerns in `internal/pg`; do not let it depend on HTTP packages.
 - Keep shape identity, offsets, materialized state, and diff behavior in `internal/shapes`.
@@ -33,6 +34,7 @@ For protocol, replication, storage, or Docker changes, also run the matching hea
 ```bash
 ./scripts/harness-check.sh --docker-e2e
 ./scripts/harness-check.sh --lifecycle
+./scripts/harness-check.sh --shadow-client
 ```
 
 Use targeted E2E scenarios while iterating, then run the full matrix when changing protocol semantics:
@@ -54,5 +56,5 @@ Use targeted E2E scenarios while iterating, then run the full matrix when changi
 ## Artifact Rules
 
 - E2E artifacts belong under `test/e2e/_artifacts/` and stay untracked.
-- Runtime scratch files belong under `test/e2e/_runtime/` or `.pulsesync/` and stay untracked.
+- Runtime scratch files belong under `test/e2e/_runtime/` or `.postgres-sync-go/` and stay untracked.
 - If a mismatch happens, preserve the artifact path in the final response so the next agent can continue from raw evidence.

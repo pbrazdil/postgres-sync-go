@@ -1,0 +1,10 @@
+postgres-sync-go
+Copyright 2026 postgres-sync-go contributors
+
+postgres-sync-go is an independent Go implementation of an Electric-compatible
+sync-service HTTP surface. ElectricSQL, Electric, and related marks belong to
+their respective owners. postgres-sync-go is not affiliated with or endorsed by those
+owners unless explicitly stated elsewhere.
+
+Third-party Go dependencies retain their own licenses. See
+docs/legal/attribution-audit.md for the current engineering audit summary.
