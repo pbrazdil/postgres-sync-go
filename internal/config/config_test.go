@@ -7,9 +7,9 @@ func TestLoaderAppliesDefaultsAndOverrides(t *testing.T) {
 
 	loader := Loader{
 		LookupEnv: lookupFromMap(map[string]string{
-			"DATABASE_URL":                     "postgresql://postgres:postgres@localhost:5432/pulsesync",
-			"ELECTRIC_SECRET":                  "test-secret",
-			"ELECTRIC_MAX_CONCURRENT_REQUESTS": `{"initial":500,"existing":30000}`,
+			"DATABASE_URL":                 "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"SYNC_SECRET":                  "test-secret",
+			"SYNC_MAX_CONCURRENT_REQUESTS": `{"initial":500,"existing":30000}`,
 		}),
 	}
 
@@ -46,13 +46,43 @@ func TestLoaderRequiresSecretUnlessInsecure(t *testing.T) {
 
 	insecureLoader := Loader{
 		LookupEnv: lookupFromMap(map[string]string{
-			"DATABASE_URL":      "postgresql://postgres:postgres@localhost:5432/pulsesync",
-			"ELECTRIC_INSECURE": "true",
+			"DATABASE_URL":  "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"SYNC_INSECURE": "true",
 		}),
 	}
 
 	if _, err := insecureLoader.Load(); err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
+	}
+}
+
+func TestLoaderParsesKnownFeatureFlags(t *testing.T) {
+	t.Parallel()
+
+	loader := Loader{
+		LookupEnv: lookupFromMap(map[string]string{
+			"DATABASE_URL":       "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"SYNC_SECRET":        "test-secret",
+			"SYNC_FEATURE_FLAGS": "allow_subqueries,unknown, tagged_subqueries, allow_subqueries",
+		}),
+	}
+
+	cfg, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.FeatureFlags.Enabled(FeatureAllowSubqueries) {
+		t.Fatalf("expected allow_subqueries to be enabled")
+	}
+	if !cfg.FeatureFlags.Enabled(FeatureTaggedSubqueries) {
+		t.Fatalf("expected tagged_subqueries to be enabled")
+	}
+	if cfg.FeatureFlags.Enabled("unknown") {
+		t.Fatalf("unexpected unknown feature flag")
+	}
+	if len(cfg.FeatureFlags) != 2 {
+		t.Fatalf("FeatureFlags = %+v, want two known unique flags", cfg.FeatureFlags)
 	}
 }
 
