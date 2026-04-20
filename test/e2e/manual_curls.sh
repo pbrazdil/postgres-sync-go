@@ -20,11 +20,13 @@ commands:
   columns-items
   subset-get
   subset-post
+  subset-subquery
   offset-now
   continuation <handle> <offset>
   live-longpoll <handle> [offset]
   live-sse <handle> [offset]
   partition-root
+  partition-child
 
 environment:
   BASE_URL   default: $BASE_URL
@@ -52,6 +54,7 @@ case "$command_name" in
     curl_json "$BASE_URL/v1/shape?table=items&offset=-1&where=priority%20%3E%3D%202&$(auth_query)"
     ;;
   subquery-items)
+    # Requires SYNC_FEATURE_FLAGS=allow_subqueries, otherwise this should return 400.
     curl_json "$BASE_URL/v1/shape?table=items&offset=-1&where=id%20IN%20%28SELECT%20item_id%20FROM%20item_flags%20WHERE%20enabled%20%3D%20true%29&$(auth_query)"
     ;;
   columns-items)
@@ -66,6 +69,9 @@ case "$command_name" in
       -H 'content-type: application/json' \
       --data "@$SUBSET_POST_BODY" \
       "$BASE_URL/v1/shape?table=items&offset=-1&$(auth_query)"
+    ;;
+  subset-subquery)
+    curl_json "$BASE_URL/v1/shape?table=items&offset=-1&subset__where=id%20IN%20%28SELECT%20item_id%20FROM%20item_flags%29&$(auth_query)"
     ;;
   offset-now)
     curl_json "$BASE_URL/v1/shape?table=items&offset=now&$(auth_query)"
@@ -100,6 +106,9 @@ case "$command_name" in
     ;;
   partition-root)
     curl_json "$BASE_URL/v1/shape?table=partitioned_items&offset=-1&$(auth_query)"
+    ;;
+  partition-child)
+    curl_json "$BASE_URL/v1/shape?table=partitioned_items_100&offset=-1&$(auth_query)"
     ;;
   *)
     usage
