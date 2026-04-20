@@ -20,6 +20,8 @@ import (
 
 const replicationStandbyTimeout = 10 * time.Second
 
+type standbyKeepaliveFunc func(pglogrepl.LSN) error
+
 func (r *Runtime) ensureReplication(ctx context.Context) error {
 	r.mu.RLock()
 	if r.replicationConn != nil {
@@ -229,18 +231,24 @@ func (r *Runtime) ensurePublication(ctx context.Context, pool *pgxpool.Pool) err
 func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clientXLogPos pglogrepl.LSN) {
 	nextStandbyMessageDeadline := time.Now().Add(replicationStandbyTimeout)
 	batch := ChangeBatch{}
+	sendStandbyStatus := func(lsn pglogrepl.LSN) error {
+		if err := pglogrepl.SendStandbyStatusUpdate(
+			context.Background(),
+			conn,
+			pglogrepl.StandbyStatusUpdate{WALWritePosition: lsn},
+		); err != nil {
+			return err
+		}
+		nextStandbyMessageDeadline = time.Now().Add(replicationStandbyTimeout)
+		return nil
+	}
 
 	for {
 		if time.Now().After(nextStandbyMessageDeadline) {
-			if err := pglogrepl.SendStandbyStatusUpdate(
-				context.Background(),
-				conn,
-				pglogrepl.StandbyStatusUpdate{WALWritePosition: clientXLogPos},
-			); err != nil {
+			if err := sendStandbyStatus(clientXLogPos); err != nil {
 				r.handleReplicationError(err, conn)
 				return
 			}
-			nextStandbyMessageDeadline = time.Now().Add(replicationStandbyTimeout)
 		}
 
 		receiveCtx, cancel := context.WithDeadline(ctx, nextStandbyMessageDeadline)
@@ -288,7 +296,7 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 				return
 			}
 
-			commitLSN, err := r.handleLogicalMessage(ctx, xld.WALData, &batch)
+			commitLSN, err := r.handleLogicalMessage(ctx, xld.WALData, &batch, sendStandbyStatus)
 			if err != nil {
 				r.handleReplicationError(err, conn)
 				return
@@ -303,7 +311,7 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 	}
 }
 
-func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batch *ChangeBatch) (pglogrepl.LSN, error) {
+func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batch *ChangeBatch, keepalive standbyKeepaliveFunc) (pglogrepl.LSN, error) {
 	logicalMsg, err := pglogrepl.Parse(walData)
 	if err != nil {
 		return 0, err
@@ -348,7 +356,12 @@ func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batc
 		}
 	case *pglogrepl.CommitMessage:
 		batch.CommitLSN = msg.CommitLSN
-		if err := r.applyChangeBatch(ctx, *batch); err != nil {
+		if err := r.applyChangeBatchWithKeepalive(ctx, *batch, func() error {
+			if keepalive == nil {
+				return nil
+			}
+			return keepalive(msg.CommitLSN)
+		}); err != nil {
 			return msg.TransactionEndLSN, err
 		}
 		batch.Reset(0)
@@ -356,6 +369,51 @@ func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batc
 	}
 
 	return 0, nil
+}
+
+func (r *Runtime) applyChangeBatchWithKeepalive(ctx context.Context, batch ChangeBatch, keepalive func() error) error {
+	return applyWithPeriodicKeepalive(ctx, replicationStandbyTimeout/2, func() error {
+		return r.applyChangeBatch(ctx, batch)
+	}, keepalive)
+}
+
+func applyWithPeriodicKeepalive(ctx context.Context, interval time.Duration, apply func() error, keepalive func() error) error {
+	if interval <= 0 {
+		interval = replicationStandbyTimeout / 2
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- apply()
+	}()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var keepaliveErr error
+	recordKeepalive := func() {
+		if keepalive == nil {
+			return
+		}
+		if err := keepalive(); err != nil && keepaliveErr == nil {
+			keepaliveErr = err
+		}
+	}
+	recordKeepalive()
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				return err
+			}
+			return keepaliveErr
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			recordKeepalive()
+		}
+	}
 }
 
 func (r *Runtime) recordInsert(batch *ChangeBatch, message *pglogrepl.InsertMessage) error {
