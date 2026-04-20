@@ -90,6 +90,7 @@ check_docs() {
 
   require_file AGENTS.md
   require_file ARCHITECTURE.md
+  require_file CHANGELOG.md
   require_file .github/ISSUE_TEMPLATE/bug_report.yml
   require_file .github/ISSUE_TEMPLATE/config.yml
   require_file .github/ISSUE_TEMPLATE/feature_request.yml
@@ -98,6 +99,8 @@ check_docs() {
   require_file LICENSE
   require_file NOTICE
   require_file README.md
+  require_file RELEASE_CHECKLIST.md
+  require_file SECURITY.md
   require_file SKILL.md
   require_file docs/ARCHITECTURE.md
   require_file docs/HARNESS_ENGINEERING.md
@@ -121,6 +124,9 @@ check_docs() {
   grep -Fq 'Dependent shapes' docs/tech-debt-tracker.md || fail "tech debt tracker must keep dependent-shape parity visible"
   grep -Fq 'name: postgres-sync-go' SKILL.md || fail "SKILL.md must be an installable postgres-sync-go skill"
   grep -Fq 'github.com/pbrazdil/postgres-sync-go' SKILL.md || fail "SKILL.md must use the public module path"
+  grep -Fq 'v0.1.0-preview.1' CHANGELOG.md || fail "CHANGELOG.md must record the current preview release"
+  grep -Fq 'v0.1.0-preview.1' README.md || fail "README.md must show the current preview release"
+  grep -Fq 'v0.1.0-preview.1' pkg/pgsync/version.go || fail "pkg/pgsync version must match the current preview release"
   grep -Fq 'cmd/postgres-sync' README.md || fail "README.md must document the postgres-sync command path"
   grep -Fq 'pkg/pgsync' README.md || fail "README.md must document the pgsync package path"
   grep -Fq 'package pgsync' pkg/pgsync/engine.go || fail "pkg/pgsync must use package name pgsync"
