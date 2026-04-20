@@ -33,6 +33,13 @@ type MaxConcurrentRequests struct {
 	Existing int `json:"existing"`
 }
 
+type FeatureFlags []string
+
+const (
+	FeatureAllowSubqueries  = "allow_subqueries"
+	FeatureTaggedSubqueries = "tagged_subqueries"
+)
+
 type CacheConfig struct {
 	MaxAge   int
 	StaleAge int
@@ -63,6 +70,16 @@ type Config struct {
 	LongPollTimeoutMS     int
 	SSETimeoutMS          int
 	AllowShapeDeletion    bool
+	FeatureFlags          FeatureFlags
+}
+
+func (f FeatureFlags) Enabled(flag string) bool {
+	for _, candidate := range f {
+		if candidate == flag {
+			return true
+		}
+	}
+	return false
 }
 
 type LookupEnvFunc func(string) (string, bool)
@@ -107,24 +124,24 @@ func (c Config) Validate() error {
 
 	if c.PooledDatabaseURL != "" {
 		if _, err := url.Parse(c.PooledDatabaseURL); err != nil {
-			return fmt.Errorf("invalid ELECTRIC_POOLED_DATABASE_URL: %w", err)
+			return fmt.Errorf("invalid SYNC_POOLED_DATABASE_URL: %w", err)
 		}
 	}
 
 	if !c.Insecure && strings.TrimSpace(c.Secret) == "" {
-		return errors.New("ELECTRIC_SECRET is required unless ELECTRIC_INSECURE=true")
+		return errors.New("SYNC_SECRET is required unless SYNC_INSECURE=true")
 	}
 
 	if c.Port <= 0 || c.Port > 65535 {
-		return fmt.Errorf("invalid ELECTRIC_PORT: %d", c.Port)
+		return fmt.Errorf("invalid SYNC_PORT: %d", c.Port)
 	}
 
 	if c.DBPoolSize <= 0 {
-		return fmt.Errorf("invalid ELECTRIC_DB_POOL_SIZE: %d", c.DBPoolSize)
+		return fmt.Errorf("invalid SYNC_DB_POOL_SIZE: %d", c.DBPoolSize)
 	}
 
 	if c.MaxConcurrentRequests.Initial <= 0 || c.MaxConcurrentRequests.Existing <= 0 {
-		return fmt.Errorf("invalid ELECTRIC_MAX_CONCURRENT_REQUESTS: %+v", c.MaxConcurrentRequests)
+		return fmt.Errorf("invalid SYNC_MAX_CONCURRENT_REQUESTS: %+v", c.MaxConcurrentRequests)
 	}
 
 	if c.Cache.MaxAge < 0 || c.Cache.StaleAge < 0 {
@@ -169,7 +186,7 @@ func (l Loader) Load() (Config, error) {
 		cfg.DatabaseURL = strings.TrimSpace(value)
 	}
 
-	if value, ok := lookup("ELECTRIC_POOLED_DATABASE_URL"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_POOLED_DATABASE_URL"); ok && strings.TrimSpace(value) != "" {
 		cfg.PooledDatabaseURL = strings.TrimSpace(value)
 	}
 
@@ -177,91 +194,120 @@ func (l Loader) Load() (Config, error) {
 		cfg.PooledDatabaseURL = cfg.DatabaseURL
 	}
 
-	if value, ok := lookup("ELECTRIC_SECRET"); ok {
+	if value, ok := lookup("SYNC_SECRET"); ok {
 		cfg.Secret = strings.TrimSpace(value)
 	}
 
-	if value, ok := lookup("ELECTRIC_INSECURE"); ok {
+	if value, ok := lookup("SYNC_INSECURE"); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_INSECURE: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_INSECURE: %w", err)
 		}
 		cfg.Insecure = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_PORT"); ok {
+	if value, ok := lookup("SYNC_PORT"); ok {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_PORT: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_PORT: %w", err)
 		}
 		cfg.Port = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_REPLICATION_STREAM_ID"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_REPLICATION_STREAM_ID"); ok && strings.TrimSpace(value) != "" {
 		cfg.ReplicationStreamID = strings.TrimSpace(value)
 	}
 
-	if value, ok := lookup("ELECTRIC_DB_POOL_SIZE"); ok {
+	if value, ok := lookup("SYNC_DB_POOL_SIZE"); ok {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_DB_POOL_SIZE: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_DB_POOL_SIZE: %w", err)
 		}
 		cfg.DBPoolSize = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_CACHE_MAX_AGE"); ok {
+	if value, ok := lookup("SYNC_CACHE_MAX_AGE"); ok {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_CACHE_MAX_AGE: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_CACHE_MAX_AGE: %w", err)
 		}
 		cfg.Cache.MaxAge = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_CACHE_STALE_AGE"); ok {
+	if value, ok := lookup("SYNC_CACHE_STALE_AGE"); ok {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_CACHE_STALE_AGE: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_CACHE_STALE_AGE: %w", err)
 		}
 		cfg.Cache.StaleAge = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_MAX_CONCURRENT_REQUESTS"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_MAX_CONCURRENT_REQUESTS"); ok && strings.TrimSpace(value) != "" {
 		if err := json.Unmarshal([]byte(value), &cfg.MaxConcurrentRequests); err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_MAX_CONCURRENT_REQUESTS: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_MAX_CONCURRENT_REQUESTS: %w", err)
 		}
 	}
 
-	if value, ok := lookup("ELECTRIC_STORAGE_MODE"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_STORAGE_MODE"); ok && strings.TrimSpace(value) != "" {
 		cfg.Storage.Mode = StorageMode(strings.TrimSpace(value))
 	}
 
-	if value, ok := lookup("ELECTRIC_STORAGE_DIR"); ok {
+	if value, ok := lookup("SYNC_STORAGE_DIR"); ok {
 		cfg.Storage.Dir = strings.TrimSpace(value)
 	}
 
-	if value, ok := lookup("ELECTRIC_LONG_POLL_TIMEOUT_MS"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_LONG_POLL_TIMEOUT_MS"); ok && strings.TrimSpace(value) != "" {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_LONG_POLL_TIMEOUT_MS: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_LONG_POLL_TIMEOUT_MS: %w", err)
 		}
 		cfg.LongPollTimeoutMS = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_SSE_TIMEOUT_MS"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_SSE_TIMEOUT_MS"); ok && strings.TrimSpace(value) != "" {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_SSE_TIMEOUT_MS: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_SSE_TIMEOUT_MS: %w", err)
 		}
 		cfg.SSETimeoutMS = parsed
 	}
 
-	if value, ok := lookup("ELECTRIC_ALLOW_SHAPE_DELETION"); ok && strings.TrimSpace(value) != "" {
+	if value, ok := lookup("SYNC_ALLOW_SHAPE_DELETION"); ok && strings.TrimSpace(value) != "" {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid ELECTRIC_ALLOW_SHAPE_DELETION: %w", err)
+			return Config{}, fmt.Errorf("invalid SYNC_ALLOW_SHAPE_DELETION: %w", err)
 		}
 		cfg.AllowShapeDeletion = parsed
 	}
 
+	if value, ok := lookup("SYNC_FEATURE_FLAGS"); ok {
+		cfg.FeatureFlags = parseFeatureFlags(value)
+	}
+
 	return cfg, cfg.Validate()
+}
+
+func parseFeatureFlags(value string) FeatureFlags {
+	known := map[string]struct{}{
+		FeatureAllowSubqueries:  {},
+		FeatureTaggedSubqueries: {},
+	}
+	seen := map[string]struct{}{}
+	flags := FeatureFlags{}
+
+	for _, raw := range strings.Split(value, ",") {
+		flag := strings.TrimSpace(raw)
+		if flag == "" {
+			continue
+		}
+		if _, ok := known[flag]; !ok {
+			continue
+		}
+		if _, ok := seen[flag]; ok {
+			continue
+		}
+		seen[flag] = struct{}{}
+		flags = append(flags, flag)
+	}
+	return flags
 }
