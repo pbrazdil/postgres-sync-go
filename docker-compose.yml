@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_DB: electric
+      POSTGRES_DB: postgres_sync_go
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     command:
@@ -14,16 +14,17 @@ services:
       - -c
       - max_wal_senders=10
     ports:
-      - "127.0.0.1:${PULSESYNC_POSTGRES_PORT:-45432}:5432"
+      - "127.0.0.1:${POSTGRES_SYNC_GO_POSTGRES_PORT:-${SYNC_POSTGRES_HOST_PORT:-45432}}:5432"
     volumes:
-      - pulsesync-postgres-data:/var/lib/postgresql/data
+      - postgres-sync-go-postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  pulsesync:
+  postgres-sync-go:
+    image: postgres-sync-go:local
     build:
       context: .
       dockerfile: Dockerfile
@@ -31,20 +32,20 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
-      SYNC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres_sync_go?sslmode=disable
+      SYNC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres_sync_go?sslmode=disable
       SYNC_SECRET: ${SYNC_SECRET:-dev-secret}
       SYNC_PORT: 3000
       SYNC_REPLICATION_STREAM_ID: ${SYNC_REPLICATION_STREAM_ID:-docker}
       SYNC_STORAGE_MODE: ${SYNC_STORAGE_MODE:-disk}
-      SYNC_STORAGE_DIR: /var/lib/pulsesync
+      SYNC_STORAGE_DIR: /var/lib/postgres-sync-go
       SYNC_FEATURE_FLAGS: ${SYNC_FEATURE_FLAGS:-}
     ports:
-      - "127.0.0.1:${PULSESYNC_HTTP_PORT:-43100}:3000"
+      - "127.0.0.1:${POSTGRES_SYNC_GO_HTTP_PORT:-${SYNC_HTTP_HOST_PORT:-43100}}:3000"
     volumes:
-      - pulsesync-data:/var/lib/pulsesync
+      - postgres-sync-go-data:/var/lib/postgres-sync-go
     restart: unless-stopped
 
 volumes:
-  pulsesync-postgres-data:
-  pulsesync-data:
+  postgres-sync-go-postgres-data:
+  postgres-sync-go-data:

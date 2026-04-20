@@ -1,6 +1,7 @@
 electric/
 test/e2e/_artifacts/
-/pulsesync
+/postgres-sync-go
+.postgres-sync-go/
 test/e2e/_runtime/
 .DS_Store
 .env

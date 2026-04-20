@@ -1,6 +1,6 @@
 .git
 .gitignore
-.pulsesync
+.postgres-sync-go
 electric
 test/e2e/_artifacts
 *.log
