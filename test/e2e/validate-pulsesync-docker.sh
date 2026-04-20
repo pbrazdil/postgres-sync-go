@@ -118,7 +118,7 @@ stop_compose_service() {
       port=$PULSE_PORT
       ;;
     electric)
-      port=$ELECTRIC_PORT
+      port=$COMPARE_PORT
       ;;
   esac
 
@@ -274,7 +274,7 @@ main() {
   require_cmd docker
   configure_one_off_docker_ports
 
-  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$ELECTRIC_PORT"
+  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
   log "using compose project: $COMPOSE_PROJECT_NAME"
 
   local scenario
