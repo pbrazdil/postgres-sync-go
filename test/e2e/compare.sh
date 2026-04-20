@@ -101,10 +101,10 @@ run_impl() {
   capture_pg_debug "$out_dir/db-before"
 
   case "$impl" in
-    pulsesync)
-      start_pulsesync "$out_dir"
+    postgres-sync-go)
+      start_postgres_sync_go "$out_dir"
       CURRENT_SERVICE_PID=$SERVICE_PID
-      base_url="http://127.0.0.1:${PULSE_PORT}"
+      base_url="http://127.0.0.1:${SYNC_GO_PORT}"
       ;;
     electric)
       start_electric "$out_dir"
@@ -132,10 +132,10 @@ compare_scenario() {
   configure_scenario_runtime_config "$scenario"
   mkdir -p "$scenario_dir"
 
-  run_impl pulsesync "$scenario" "$scenario_dir/pulsesync"
+  run_impl postgres-sync-go "$scenario" "$scenario_dir/postgres-sync-go"
   run_impl electric "$scenario" "$scenario_dir/electric"
 
-  if compare_step_files "$scenario_dir/pulsesync/scenario" "$scenario_dir/electric/scenario" "$scenario_dir/diffs"; then
+  if compare_step_files "$scenario_dir/postgres-sync-go/scenario" "$scenario_dir/electric/scenario" "$scenario_dir/diffs"; then
     log "scenario passed: $scenario"
     return 0
   fi

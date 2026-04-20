@@ -7,19 +7,22 @@ cd "$ROOT_DIR"
 
 RUN_DOCKER_E2E=0
 RUN_LIFECYCLE=0
+RUN_SHADOW_CLIENT=0
 DOCS_ONLY=0
 
 usage() {
   cat <<'USAGE'
-Usage: ./scripts/harness-check.sh [--docs-only] [--docker-e2e] [--lifecycle] [--all]
+Usage: ./scripts/harness-check.sh [--docs-only] [--docker-e2e] [--lifecycle] [--shadow-client] [--all]
 
-Runs the local PulseSync validation harness.
+Runs the local postgres-sync-go validation harness.
 
 Options:
   --docs-only    Validate repository knowledge-map files only.
-  --docker-e2e   Also run the Docker Electric-vs-PulseSync comparison matrix.
-  --lifecycle    Also run PulseSync Docker lifecycle validation.
-  --all          Run local checks, Docker comparison, and lifecycle validation.
+  --docker-e2e   Also run the Docker Electric-vs-postgres-sync-go comparison matrix.
+  --lifecycle    Also run postgres-sync-go Docker lifecycle validation.
+  --shadow-client
+                 Also run unchanged TypeScript client shadow validation against postgres-sync-go.
+  --all          Run local checks, Docker comparison, lifecycle validation, and shadow-client validation.
   -h, --help     Show this help.
 USAGE
 }
@@ -35,9 +38,13 @@ while (($# > 0)); do
     --lifecycle)
       RUN_LIFECYCLE=1
       ;;
+    --shadow-client)
+      RUN_SHADOW_CLIENT=1
+      ;;
     --all)
       RUN_DOCKER_E2E=1
       RUN_LIFECYCLE=1
+      RUN_SHADOW_CLIENT=1
       ;;
     -h|--help)
       usage
@@ -83,10 +90,19 @@ check_docs() {
 
   require_file AGENTS.md
   require_file ARCHITECTURE.md
+  require_file .github/ISSUE_TEMPLATE/bug_report.yml
+  require_file .github/ISSUE_TEMPLATE/config.yml
+  require_file .github/ISSUE_TEMPLATE/feature_request.yml
+  require_file .github/dependabot.yml
+  require_file .github/pull_request_template.md
+  require_file LICENSE
+  require_file NOTICE
   require_file README.md
+  require_file SKILL.md
   require_file docs/ARCHITECTURE.md
   require_file docs/HARNESS_ENGINEERING.md
   require_file docs/QUALITY.md
+  require_file docs/legal/attribution-audit.md
   require_file docs/tech-debt-tracker.md
   require_file docs/exec-plans/README.md
   require_file test/e2e/README.md
@@ -99,12 +115,32 @@ check_docs() {
   grep -Fq '## Architectural Invariants' ARCHITECTURE.md || fail "ARCHITECTURE.md must call out invariants"
   grep -Fq '## Cross-Cutting Concerns' ARCHITECTURE.md || fail "ARCHITECTURE.md must cover cross-cutting concerns"
   grep -Fq 'test/e2e/compare-docker.sh' docs/HARNESS_ENGINEERING.md || fail "harness docs must mention Docker comparison"
+  grep -Fq 'test/e2e/shadow-client-docker.sh' docs/HARNESS_ENGINEERING.md || fail "harness docs must mention shadow-client validation"
+  grep -Fq 'Apache License 2.0' docs/legal/attribution-audit.md || fail "license audit must record the release license decision"
+  grep -Fq 'No license-incompatible source copying was identified' docs/legal/attribution-audit.md || fail "license audit must record source-copying conclusion"
   grep -Fq 'Dependent shapes' docs/tech-debt-tracker.md || fail "tech debt tracker must keep dependent-shape parity visible"
+  grep -Fq 'name: postgres-sync-go' SKILL.md || fail "SKILL.md must be an installable postgres-sync-go skill"
+  grep -Fq 'github.com/pbrazdil/postgres-sync-go' SKILL.md || fail "SKILL.md must use the public module path"
+  grep -Fq 'cmd/postgres-sync' README.md || fail "README.md must document the postgres-sync command path"
+  grep -Fq 'pkg/pgsync' README.md || fail "README.md must document the pgsync package path"
+  grep -Fq 'package pgsync' pkg/pgsync/engine.go || fail "pkg/pgsync must use package name pgsync"
+  grep -Fq 'ENTRYPOINT ["/usr/local/bin/postgres-sync"]' Dockerfile || fail "Dockerfile must expose the postgres-sync binary"
+  grep -Fq 'image: postgres-sync-go:local' docker-compose.yml || fail "Compose must tag the local Docker image as postgres-sync-go:local"
+  grep -Fq 'POSTGRES_SYNC_GO_HTTP_PORT' docker-compose.yml || fail "Compose HTTP host-port override must use POSTGRES_SYNC_GO_HTTP_PORT"
+  grep -Fq 'POSTGRES_SYNC_GO_POSTGRES_PORT' docker-compose.yml || fail "Compose Postgres host-port override must use POSTGRES_SYNC_GO_POSTGRES_PORT"
+  local private_path_refs
+  local mac_home_prefix
+  mac_home_prefix=$(printf '/%s/' Users)
+  private_path_refs=$(grep -R -n -E "$mac_home_prefix|/home/[^/ ]+/" .github README.md SKILL.md AGENTS.md ARCHITECTURE.md docs test/e2e/README.md 2>/dev/null || true)
+  if [ -n "$private_path_refs" ]; then
+    printf '%s\n' "$private_path_refs" >&2
+    fail "public docs must not contain private absolute home paths"
+  fi
   local old_env_refs
   old_env_refs=$(grep -R -n -E 'ELECTRIC_[A-Z0-9_]+' Dockerfile docker-compose.yml internal pkg README.md ARCHITECTURE.md docs 2>/dev/null || true)
   if [ -n "$old_env_refs" ]; then
     printf '%s\n' "$old_env_refs" >&2
-    fail "PulseSync-owned config must use SYNC_* env vars"
+    fail "postgres-sync-go-owned config must use SYNC_* env vars"
   fi
 }
 
@@ -119,7 +155,8 @@ check_shell() {
     test/e2e/manual_curls.sh \
     test/e2e/start-both.sh \
     test/e2e/start-both-docker.sh \
-    test/e2e/validate-pulsesync-docker.sh
+    test/e2e/shadow-client-docker.sh \
+    test/e2e/validate-postgres-sync-go-docker.sh
 }
 
 check_go_format() {
@@ -168,7 +205,17 @@ run_lifecycle() {
   require_cmd curl
   require_cmd psql
 
-  run ./test/e2e/validate-pulsesync-docker.sh
+  run ./test/e2e/validate-postgres-sync-go-docker.sh
+}
+
+run_shadow_client() {
+  require_cmd docker
+  require_cmd go
+  require_cmd curl
+  require_cmd psql
+  require_cmd node
+
+  run ./test/e2e/shadow-client-docker.sh
 }
 
 check_docs
@@ -188,6 +235,10 @@ fi
 
 if [ "$RUN_LIFECYCLE" -eq 1 ]; then
   run_lifecycle
+fi
+
+if [ "$RUN_SHADOW_CLIENT" -eq 1 ]; then
+  run_shadow_client
 fi
 
 log "all requested checks passed"

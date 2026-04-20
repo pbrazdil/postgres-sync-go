@@ -7,7 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/lib.sh"
 
 COMPOSE_FILE=${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.yml}
-COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-pulsesync-e2e-$(date +%Y%m%d%H%M%S)}
+COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-postgres-sync-go-e2e-$(date +%Y%m%d%H%M%S)}
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ]; then
   SCENARIOS=(
@@ -44,6 +44,22 @@ FAILURES=0
 
 compose_cmd() {
   docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+}
+
+ensure_compare_compose_source() {
+  if [ ! -d "$COMPARE_SYNC_DIR" ]; then
+    comparison_unavailable
+  fi
+  if [ -z "$COMPARE_TELEMETRY_DIR" ] || [ ! -d "$COMPARE_TELEMETRY_DIR" ]; then
+    cat >&2 <<EOF
+[e2e] comparison telemetry source unavailable
+[e2e] Set COMPARE_TELEMETRY_DIR to the comparison telemetry package checkout.
+[e2e] Current COMPARE_TELEMETRY_DIR: ${COMPARE_TELEMETRY_DIR:-<empty>}
+EOF
+    exit 77
+  fi
+  export COMPARE_SYNC_DIR
+  export COMPARE_TELEMETRY_DIR
 }
 
 compare_step_files() {
@@ -96,11 +112,11 @@ start_postgres_compose() {
   wait_for_postgres
 }
 
-start_pulsesync_compose() {
-  log "starting dockerized PulseSync on port $PULSE_PORT"
-  compose_cmd up -d --build --no-deps pulsesync >/dev/null
-  if ! wait_for_active_health "http://127.0.0.1:${PULSE_PORT}/v1/health"; then
-    compose_cmd logs --no-color pulsesync >&2 || true
+start_postgres_sync_go_compose() {
+  log "starting dockerized postgres-sync-go on port $SYNC_GO_PORT"
+  compose_cmd up -d --build --no-deps postgres-sync-go >/dev/null
+  if ! wait_for_active_health "http://127.0.0.1:${SYNC_GO_PORT}/v1/health"; then
+    compose_cmd logs --no-color postgres-sync-go >&2 || true
     return 1
   fi
 }
@@ -124,8 +140,8 @@ stop_compose_service() {
   compose_cmd rm -sf "$service" >/dev/null 2>&1 || true
 
   case "$service" in
-    pulsesync)
-      port=$PULSE_PORT
+    postgres-sync-go)
+      port=$SYNC_GO_PORT
       ;;
     electric)
       port=$COMPARE_PORT
@@ -154,10 +170,10 @@ run_impl() {
   capture_pg_debug "$out_dir/db-before"
 
   case "$impl" in
-    pulsesync)
-      service_name="pulsesync"
-      start_pulsesync_compose
-      base_url="http://127.0.0.1:${PULSE_PORT}"
+    postgres-sync-go)
+      service_name="postgres-sync-go"
+      start_postgres_sync_go_compose
+      base_url="http://127.0.0.1:${SYNC_GO_PORT}"
       ;;
     electric)
       service_name="electric"
@@ -183,13 +199,13 @@ compare_scenario() {
   log "running docker scenario: $scenario"
   configure_scenario_runtime_config "$scenario"
   configure_one_off_service_ports
-  log "scenario ports: pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
+  log "scenario ports: postgres-sync-go=$SYNC_GO_PORT electric=$COMPARE_PORT"
   mkdir -p "$scenario_dir"
 
-  run_impl pulsesync "$scenario" "$scenario_dir/pulsesync"
+  run_impl postgres-sync-go "$scenario" "$scenario_dir/postgres-sync-go"
   run_impl electric "$scenario" "$scenario_dir/electric"
 
-  if compare_step_files "$scenario_dir/pulsesync/scenario" "$scenario_dir/electric/scenario" "$scenario_dir/diffs"; then
+  if compare_step_files "$scenario_dir/postgres-sync-go/scenario" "$scenario_dir/electric/scenario" "$scenario_dir/diffs"; then
     log "docker scenario passed: $scenario"
     return 0
   fi
@@ -201,9 +217,10 @@ compare_scenario() {
 main() {
   ensure_common_requirements
   require_cmd docker
+  ensure_compare_compose_source
   configure_one_off_docker_ports
 
-  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
+  log "using one-off host ports: postgres=$DB_PORT postgres-sync-go=$SYNC_GO_PORT electric=$COMPARE_PORT"
   log "using compose project: $COMPOSE_PROJECT_NAME"
 
   start_postgres_compose
