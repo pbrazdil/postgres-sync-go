@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -13,10 +12,6 @@ import (
 
 	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
 	"github.com/pbrazdil/postgres-sync-go/internal/sqlinspect"
-)
-
-var (
-	dependencyRelationPattern = regexp.MustCompile(`(?i)\b(from|join)\s+(?:only\s+)?((?:"[^"]+"|[a-zA-Z_][a-zA-Z0-9_$]*))(?:\s*\.\s*((?:"[^"]+"|[a-zA-Z_][a-zA-Z0-9_$]*)))?`)
 )
 
 type relationMetadata struct {
@@ -290,18 +285,14 @@ func liveDependenciesForDefinition(def shapes.Definition) liveDependencySet {
 		}
 
 		unsupported = true
-		matches := dependencyRelationPattern.FindAllStringSubmatch(sanitized, -1)
-		if len(matches) == 0 {
+		scan := scanDependencyRelations(sanitized, def.Relation.Schema)
+		if scan.Wildcard {
 			wildcard = true
-			continue
 		}
-
-		for _, match := range matches {
-			relation, ok := parseDependencyRelation(match[2], match[3], def.Relation.Schema)
-			if !ok {
-				wildcard = true
-				continue
-			}
+		if len(scan.Relations) == 0 {
+			wildcard = true
+		}
+		for _, relation := range scan.Relations {
 			relations[dependencyRelationKey(relation)] = relation
 		}
 	}
@@ -335,36 +326,6 @@ func definitionDependencyClauses(def shapes.Definition) []string {
 		clauses = append(clauses, def.Subset.Where, def.Subset.WhereExpr, def.Subset.OrderByExpr)
 	}
 	return clauses
-}
-
-func parseDependencyRelation(first string, second string, defaultSchema string) (shapes.Relation, bool) {
-	left, ok := normalizeDependencyIdentifier(first)
-	if !ok {
-		return shapes.Relation{}, false
-	}
-	if second == "" {
-		return shapes.Relation{Schema: defaultSchema, Table: left}, true
-	}
-
-	right, ok := normalizeDependencyIdentifier(second)
-	if !ok {
-		return shapes.Relation{}, false
-	}
-	return shapes.Relation{Schema: left, Table: right}, true
-}
-
-func normalizeDependencyIdentifier(value string) (string, bool) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return "", false
-	}
-	if strings.HasPrefix(trimmed, `"`) {
-		if !strings.HasSuffix(trimmed, `"`) || len(trimmed) < 2 {
-			return "", false
-		}
-		return strings.ReplaceAll(trimmed[1:len(trimmed)-1], `""`, `"`), true
-	}
-	return strings.ToLower(trimmed), true
 }
 
 func dependencyRelationKey(relation shapes.Relation) string {
