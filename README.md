@@ -4,8 +4,6 @@ PulseSync is a Go rewrite of the ElectricSQL sync service.
 
 It exposes an Electric-compatible HTTP surface, can run as an embedded library inside another Go process, and can also run as a standalone binary.
 
-The original Electric implementation remains in `electric/` and is treated as the reference behavior and compatibility oracle.
-
 ## Status
 
 PulseSync is usable for local development, protocol evaluation, and side-by-side shadow runs.
@@ -21,21 +19,22 @@ What is implemented today:
 - logical replication startup and reconnect supervision
 - PK-targeted live refresh for root-table and partition fanout paths
 - long-poll and SSE live delivery
-- conservative invalidation for unsupported dependent-shape live cases, including cross-table subquery move-in paths
-- Dockerized Electric vs PulseSync differential comparison for the current supported scenario set
+- `SYNC_FEATURE_FLAGS` parsing, including rejection of subquery shapes unless `allow_subqueries` is enabled
+- dependent-shape live replay for refreshable subquery shapes, including move-in and move-out events
+- Dockerized differential comparison for the current supported scenario set
 - Dockerized PulseSync lifecycle validation for disk restart continuity, corrupt-shape recovery, and reconnect health transitions
 - conservative invalidation and `must-refetch` behavior when correctness cannot be proven
 
 What is still missing for parity signoff:
 
-- broader Electric vs PulseSync differential coverage for dependent shapes, longer-running SSE behavior, and more advanced `log` / replica combinations
-- broader dependent-shape tracking for exact cross-table move-in and move-out semantics, including Electric tag parity
-- production validation against unchanged Electric clients in shadow mode
+- broader dependent-shape tracking for complex nested, negated, or multi-hop subquery plans
+- longer-running shadow validation for SSE behavior, client reconnects, storage growth, WAL retention, and production recovery drills
+- production validation against unchanged compatible clients in shadow mode
 
 ## Goals
 
 - keep the public Go API small and embeddable
-- keep the HTTP surface compatible with Electric clients
+- keep the HTTP surface compatible with existing clients
 - prefer correctness over stale or guessed live results
 - keep the default runtime lightweight and memory-backed
 - support a durable `disk` mode without changing the public API
@@ -50,19 +49,45 @@ What is still missing for parity signoff:
 - `internal/protocol`: Electric-compatible request parsing and response delivery
 - `internal/shapes`: shape identity, in-memory state, diffing, subscriptions
 - `internal/storage`: memory and disk-backed persistence
-- `electric/`: upstream reference implementation
-- `test/e2e`: seed data, manual curls, side-by-side runner, and normalized Electric vs PulseSync compare harness
+- `ARCHITECTURE.md`: short physical codemap and architectural invariants
+- `docs`: architecture, harness workflow, quality map, and technical debt tracker
+- `scripts`: local validation and repository harness utilities
+- `test/e2e`: seed data, manual curls, side-by-side runner, and normalized protocol compare harness
+
+## Agent/Harness Workflow
+
+PulseSync keeps repository knowledge local and executable so future agent runs can validate their own work.
+
+- `AGENTS.md` is the short map for future agents.
+- `ARCHITECTURE.md` describes package boundaries, runtime flow, and invariants.
+- `docs/HARNESS_ENGINEERING.md` describes the feedback loop and artifact rules.
+- `docs/QUALITY.md` maps change types to validation gates.
+- `docs/tech-debt-tracker.md` keeps parity and hardening debt visible.
+
+Default local validation:
+
+```bash
+./scripts/harness-check.sh
+```
+
+Heavier gates:
+
+```bash
+./scripts/harness-check.sh --docker-e2e
+./scripts/harness-check.sh --lifecycle
+./scripts/harness-check.sh --all
+```
 
 ## E2E Harness
 
-The repo includes a small end-to-end harness for exercising PulseSync against a seeded Postgres database and comparing it against upstream Electric.
+The repo includes a small end-to-end harness for exercising PulseSync against a seeded Postgres database and comparing protocol output.
 
 Useful entrypoints:
 
 - `./test/e2e/start-both.sh`
-  Starts PulseSync and Electric side by side against the same Postgres instance for manual inspection.
+  Starts both sync services side by side against the same Postgres instance for manual inspection.
 - `./test/e2e/start-both-docker.sh`
-  Starts dockerized Postgres, PulseSync, and Electric side by side and streams container logs.
+  Starts dockerized Postgres and both sync services side by side and streams container logs.
 - `./test/e2e/manual_curls.sh`
   Ready-made curl commands for `/v1/health`, snapshots, subset requests, continuations, long-poll, SSE, and partitioned tables.
 - `./test/e2e/compare.sh`
@@ -72,7 +97,7 @@ Useful entrypoints:
 - `./test/e2e/validate-pulsesync-docker.sh`
   Runs PulseSync-specific lifecycle checks for disk restart continuity, deterministic `must-refetch` on corrupt persisted state, and health degradation/recovery across replication disconnects.
 
-The current differential matrix covers health, snapshots, subset requests, `offset=now` continuations, long-poll, SSE insert delivery, truncate invalidation, conservative dependent-shape `must-refetch`, overload handling, `log=changes_only`, and partitioned-root fanout.
+The current differential matrix covers health, snapshots, subset requests, subset subquery rejection, `offset=now` continuations, long-poll, SSE insert delivery and keepalives, truncate invalidation, subquery feature-flag rejection, dependent-shape move-in/move-out live replay, handle-definition mismatch, overload handling, `log=full`, `log=changes_only`, `replica=full`, partitioned-root fanout, and child-partition fanout.
 
 Artifacts are written under `test/e2e/_artifacts/<timestamp>/` and include raw request/response files, normalized outputs, Postgres debug snapshots, and per-service logs.
 
@@ -92,7 +117,7 @@ Artifacts are written under `test/e2e/_artifacts/<timestamp>/` and include raw r
 Notes:
 
 - `DATABASE_URL` should point to a direct Postgres connection, not a transaction-pooled proxy, because PulseSync also uses it for logical replication.
-- `ELECTRIC_POOLED_DATABASE_URL` can point to a pooled query endpoint if you want separate query and replication connections.
+- `SYNC_POOLED_DATABASE_URL` can point to a pooled query endpoint if you want separate query and replication connections.
 
 ## Standalone Usage
 
@@ -106,10 +131,10 @@ Run it with a minimal config:
 
 ```bash
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
-export ELECTRIC_POOLED_DATABASE_URL="$DATABASE_URL"
-export ELECTRIC_SECRET='dev-secret'
-export ELECTRIC_PORT=3000
-export ELECTRIC_STORAGE_MODE=memory
+export SYNC_POOLED_DATABASE_URL="$DATABASE_URL"
+export SYNC_SECRET='dev-secret'
+export SYNC_PORT=3000
+export SYNC_STORAGE_MODE=memory
 
 go run ./cmd/pulsesync
 ```
@@ -118,7 +143,7 @@ For local testing without a shared secret:
 
 ```bash
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
-export ELECTRIC_INSECURE=true
+export SYNC_INSECURE=true
 
 go run ./cmd/pulsesync
 ```
@@ -159,7 +184,7 @@ That stack starts:
 - Postgres with logical replication enabled
 - PulseSync on `http://127.0.0.1:43100`
 
-The default host ports intentionally avoid the common local Electric/Postgres development ports:
+The default host ports intentionally avoid common local sync-service/Postgres development ports:
 
 - PulseSync: `43100`
 - Postgres: `45432`
@@ -168,9 +193,10 @@ Useful environment overrides:
 
 - `PULSESYNC_HTTP_PORT`
 - `PULSESYNC_POSTGRES_PORT`
-- `ELECTRIC_SECRET`
-- `ELECTRIC_REPLICATION_STREAM_ID`
-- `ELECTRIC_STORAGE_MODE`
+- `SYNC_SECRET`
+- `SYNC_REPLICATION_STREAM_ID`
+- `SYNC_FEATURE_FLAGS`
+- `SYNC_STORAGE_MODE`
 
 The default Compose config uses durable `disk` storage in a Docker volume mounted at `/var/lib/pulsesync`.
 
@@ -260,7 +286,7 @@ Notes:
 - `secret` and legacy `api_secret` query parameters are accepted.
 - `live_sse=true` requires `live=true`.
 - subset requests are snapshot-only; they do not long-poll and they do not stream SSE.
-- shape deletion via `DELETE /v1/shape` is available only when `ELECTRIC_ALLOW_SHAPE_DELETION=true`.
+- shape deletion via `DELETE /v1/shape` is available only when `SYNC_ALLOW_SHAPE_DELETION=true`.
 
 ### Example Requests
 
@@ -301,20 +327,21 @@ PulseSync currently loads its standalone config from environment variables.
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `DATABASE_URL` | yes | none | Direct Postgres connection. Used for replication. |
-| `ELECTRIC_POOLED_DATABASE_URL` | no | `DATABASE_URL` | Optional separate query connection. |
-| `ELECTRIC_SECRET` | yes unless insecure | none | Shared secret for `/v1/shape`. |
-| `ELECTRIC_INSECURE` | no | `false` | Disables secret enforcement. |
-| `ELECTRIC_PORT` | no | `3000` | HTTP listen port. |
-| `ELECTRIC_REPLICATION_STREAM_ID` | no | `default` | Used in publication and slot naming. |
-| `ELECTRIC_DB_POOL_SIZE` | no | `20` | Max query pool size. |
-| `ELECTRIC_MAX_CONCURRENT_REQUESTS` | no | `{"initial":300,"existing":10000}` | Admission limits for initial vs existing shape requests. |
-| `ELECTRIC_CACHE_MAX_AGE` | no | `60` | Default cache max-age for non-live responses. |
-| `ELECTRIC_CACHE_STALE_AGE` | no | `300` | Default `stale-while-revalidate` for non-live responses. |
-| `ELECTRIC_STORAGE_MODE` | no | `memory` | `memory` or `disk`. |
-| `ELECTRIC_STORAGE_DIR` | no | `./.pulsesync` in `disk` mode | Storage directory for SQLite metadata and chunk files. |
-| `ELECTRIC_LONG_POLL_TIMEOUT_MS` | no | `20000` | Wait duration for long-poll live requests. |
-| `ELECTRIC_SSE_TIMEOUT_MS` | no | `60000` | Used for SSE cache headers and keepalive pacing. |
-| `ELECTRIC_ALLOW_SHAPE_DELETION` | no | `false` | Enables `DELETE /v1/shape`. |
+| `SYNC_POOLED_DATABASE_URL` | no | `DATABASE_URL` | Optional separate query connection. |
+| `SYNC_SECRET` | yes unless insecure | none | Shared secret for `/v1/shape`. |
+| `SYNC_INSECURE` | no | `false` | Disables secret enforcement. |
+| `SYNC_PORT` | no | `3000` | HTTP listen port. |
+| `SYNC_REPLICATION_STREAM_ID` | no | `default` | Used in publication and slot naming. |
+| `SYNC_DB_POOL_SIZE` | no | `20` | Max query pool size. |
+| `SYNC_MAX_CONCURRENT_REQUESTS` | no | `{"initial":300,"existing":10000}` | Admission limits for initial vs existing shape requests. |
+| `SYNC_CACHE_MAX_AGE` | no | `60` | Default cache max-age for non-live responses. |
+| `SYNC_CACHE_STALE_AGE` | no | `300` | Default `stale-while-revalidate` for non-live responses. |
+| `SYNC_STORAGE_MODE` | no | `memory` | `memory` or `disk`. |
+| `SYNC_STORAGE_DIR` | no | `./.pulsesync` in `disk` mode | Storage directory for SQLite metadata and chunk files. |
+| `SYNC_LONG_POLL_TIMEOUT_MS` | no | `20000` | Wait duration for long-poll live requests. |
+| `SYNC_SSE_TIMEOUT_MS` | no | `60000` | Used for SSE cache headers. PulseSync defaults SSE keepalive comments to the compatible 21s cadence. |
+| `SYNC_ALLOW_SHAPE_DELETION` | no | `false` | Enables `DELETE /v1/shape`. |
+| `SYNC_FEATURE_FLAGS` | no | none | Comma-separated feature flags. PulseSync recognizes `allow_subqueries` and `tagged_subqueries`; subquery shapes are rejected unless `allow_subqueries` is present. |
 
 Current gaps in standalone config loading:
 
@@ -369,25 +396,26 @@ Important runtime behavior:
 - The query path still accepts raw `where` and related filter strings and passes them through to Postgres. There is no full Electric query planner or SQL validator yet.
 - Publication handling is currently automatic and uses `FOR ALL TABLES`.
 - Metrics are minimal.
-- The main compatibility target is Electric clients over HTTP, not a new direct Go materialization API.
+- The main compatibility target is existing HTTP clients, not a new direct Go materialization API.
 
 ## Known Issues
 
-- The repo now has a real Electric-vs-PulseSync differential runner and a PulseSync lifecycle validator, but the covered matrix is still too small for cutover.
+- The repo now has a real protocol differential runner and a PulseSync lifecycle validator, but the covered matrix is still too small for cutover.
 - Cross-table dependent live semantics are not fully implemented.
-- Shapes that appear to depend on unsupported query semantics are handled conservatively and may invalidate more often than Electric.
+- `tagged_subqueries` is recognized for config compatibility. PulseSync emits stable dependency tags for refreshable subquery shapes, but complex nested or negated dependency plans still need broader parity coverage.
+- Shapes that cannot be safely refreshed are handled conservatively and may still force refetch rather than risk stale results.
 - `disk` mode restart continuity and corrupt-state recovery are covered by the Docker validator, but not yet by long-running shadow traffic with a representative workload.
 - Standalone config still has a few env-loading gaps, notably listen host and metrics path.
 
 ## Future TODO
 
-- expand the Electric differential matrix to cover SSE, truncates, overload, and more `log=full` / `log=changes_only` cases
+- expand the protocol differential matrix with longer-running SSE, more replica modes, shape deletion/rotation, and complex tagged dependent-shape cases
 - add more real integration coverage around unsupported live invalidation paths
 - validate long-running restart continuity and slot behavior under representative shadow traffic
 - add manual publication mode
 - improve unsupported-shape detection with a more robust dependency model
 - expand telemetry and Prometheus metrics
-- package the standalone binary with Docker and deployment examples
+- polish Docker packaging and add deployment examples
 
 ## Development
 
