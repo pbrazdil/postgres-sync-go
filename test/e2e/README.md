@@ -1,6 +1,6 @@
 # E2E Harness
 
-This directory contains a small but extensible end-to-end comparison harness for PulseSync and the upstream Electric sync service.
+This directory contains a small but extensible end-to-end protocol comparison harness for PulseSync.
 
 It is designed for two workflows:
 
@@ -16,11 +16,11 @@ It is designed for two workflows:
 - `manual_curls.sh`
   Ready-to-run curl commands for manual testing.
 - `start-both.sh`
-  Starts PulseSync and Electric side by side for interactive debugging.
+  Starts both sync services side by side for interactive debugging.
 - `start-both-docker.sh`
-  Starts dockerized Postgres, PulseSync, and Electric and streams container logs.
+  Starts dockerized Postgres, PulseSync, and the comparison service, then streams container logs.
 - `compare.sh`
-  Runs the seeded scenarios against PulseSync and Electric one by one and diffs normalized outputs.
+  Runs the seeded scenarios against PulseSync and the comparison service one by one, then diffs normalized outputs.
 - `compare-docker.sh`
   Runs the same compare flow against Docker containers instead of host processes.
 - `validate-pulsesync-docker.sh`
@@ -28,27 +28,27 @@ It is designed for two workflows:
 - `cmd/pulsediff`
   Small helper used to normalize HTTP headers and bodies before diffing.
 - `docker-compose.yml`
-  Containerized side-by-side stack for Postgres, PulseSync, and Electric.
+  Containerized side-by-side stack for Postgres, PulseSync, and the comparison service.
 
 ## Default Ports
 
 - Host-run harness defaults:
   - Postgres: `54321`
   - PulseSync: `3100`
-  - Electric: `3200`
+  - Comparison service: `3200`
 - Dockerized harness defaults:
   - auto-selected free host ports in high one-off ranges
   - Postgres range: `45432-45532`
   - PulseSync range: `43100-43199`
-  - Electric range: `43200-43299`
+  - Comparison service range: `43200-43299`
 
 ## Requirements
 
 - `go`
 - `curl`
 - `psql`
-- `mix` for running Electric from source
-- `docker` if you want the harness to start Electric's dev Postgres automatically
+- `mix` for running the comparison service from source
+- `docker` if you want the harness to start the comparison Postgres automatically
 
 For the Dockerized E2E path:
 
@@ -91,9 +91,9 @@ Run the PulseSync lifecycle validator:
 ./test/e2e/validate-pulsesync-docker.sh
 ```
 
-The Docker scripts choose free host ports by default and print the selected ports before startup. You can still pin them explicitly with `DB_PORT`, `PULSE_PORT`, and `ELECTRIC_PORT`.
+The Docker scripts choose free host ports by default and print the selected ports before startup. You can still pin them explicitly with `DB_PORT`, `PULSE_PORT`, and `COMPARE_PORT`.
 
-The Docker compare runner rotates the PulseSync and Electric host ports per scenario inside those ranges so rapid container restarts do not contend with lingering Docker port allocations.
+The Docker compare runner rotates the PulseSync and comparison-service host ports per scenario inside those ranges so rapid container restarts do not contend with lingering Docker port allocations.
 
 If you already have a suitable Postgres instance running at `DATABASE_URL`, skip the Docker startup step:
 
@@ -115,18 +115,26 @@ test/e2e/_artifacts/<timestamp>/
 - `columns_snapshot`
 - `subset_get_snapshot`
 - `subset_post_snapshot`
+- `subset_subquery_rejected`
 - `offset_now_then_insert`
 - `offset_now_then_update`
 - `offset_now_then_delete`
 - `live_longpoll_insert`
 - `live_sse_insert`
+- `live_sse_keepalive`
 - `truncate_then_must_refetch`
-- `subquery_move_in_must_refetch`
+- `subquery_rejected_without_feature_flag`
+- `subquery_move_in_live_replay`
+- `subquery_move_out_live_replay`
+- `handle_definition_mismatch_must_refetch`
+- `log_full_offset_now_then_update`
 - `log_changes_only_initial_snapshot`
 - `log_changes_only_offset_now_then_update`
+- `replica_full_offset_now_then_update`
 - `overload_existing_live_request`
 - `partition_root_snapshot`
 - `partition_offset_now_then_insert`
+- `partition_child_offset_now_then_insert`
 
 ## Current PulseSync Validation Scenarios
 
@@ -136,21 +144,19 @@ test/e2e/_artifacts/<timestamp>/
 
 ## Notes
 
-- The compare runner executes PulseSync and Electric one by one, not simultaneously. That makes the DB state deterministic across both runs.
+- The compare runner executes PulseSync and the comparison service one by one, not simultaneously. That makes the DB state deterministic across both runs.
 - The side-by-side runner exists separately for manual inspection and debugging.
 - The Docker compare runner keeps Postgres and both sync services in containers but still uses host `curl`, `psql`, and the Go normalizer helper.
 - The Docker scripts also generate a unique Compose project name by default so they do not trample another long-running stack from the same repo checkout.
 - Response normalization intentionally removes unstable values such as dynamic handles, cursors, and etags. The goal is to compare semantics, not instance-local IDs.
-- The normalizer also drops Electric's subquery `tags` headers for the conservative dependent-shape scenario. That scenario is validating `must-refetch` behavior, not exact tagged-subquery parity.
+- The normalizer preserves the presence and count of dependent-shape tags, but replaces instance-local tag values before diffing.
 - Raw request/response files and service logs are still stored so mismatches can be debugged from the underlying data.
 
 ## Future Expansion
 
 The harness is intentionally small today, but it is structured to grow into a fuller parity suite. The next useful additions are:
 
-- explicit `must-refetch` rotation scenarios
-- partition child-table live scenarios
-- longer-running SSE keepalive parity against Electric
-- exact dependent-shape tag parity for subquery-enabled matrices
-- a broader matrix for `log=full` vs `log=changes_only`
+- complex nested and negated dependent-shape matrices
+- shape deletion scenarios
+- a broader matrix for replica modes and column projections
 - broader disk corruption and recovery matrices
