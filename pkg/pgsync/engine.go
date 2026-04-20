@@ -62,7 +62,7 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	runtime := pg.NewRuntime(cfg, shapeManager, storeImpl)
-	telemetryProvider := telemetry.NewProvider(Version, cfg.Telemetry)
+	telemetryProvider := telemetry.NewProvider(Version, cfg.Telemetry, cfg.MaxConcurrentRequests)
 	protocolService := protocol.NewService(cfg, shapeManager, runtime)
 	router := httpapi.NewRouter("postgres-sync-go/"+Version, protocolService, telemetryProvider, runtime)
 

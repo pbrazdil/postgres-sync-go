@@ -257,7 +257,7 @@ Implemented routes:
 | `OPTIONS /v1/shape` | CORS preflight; unauthenticated |
 | `GET /metrics` | minimal metrics surface |
 
-`/metrics` currently exposes only a static `postgres_sync_go_info` metric. It is not a full Prometheus instrumentation surface yet.
+`/metrics` currently exposes build info and admission-limit gauges. It is not a full Prometheus instrumentation surface yet.
 
 ## `/v1/shape` request support
 
