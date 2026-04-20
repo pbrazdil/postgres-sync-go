@@ -7,7 +7,7 @@ Use this checklist before publishing a preview release.
 - [ ] Set `pkg/pgsync.Version` to the release tag.
 - [ ] Update `README.md` with the release version.
 - [ ] Update `CHANGELOG.md`.
-- [ ] Confirm the tag name matches the version, for example `v0.1.0-preview.1`.
+- [ ] Confirm the tag name matches the version, for example `v0.1.0-preview.2`.
 
 ## Validation
 

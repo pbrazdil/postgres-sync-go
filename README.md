@@ -438,7 +438,7 @@ Run vet:
 go vet ./...
 ```
 
-The current preview version is `v0.1.0-preview.1`.
+The current preview version is `v0.1.0-preview.2`.
 
 ## Naming reference
 

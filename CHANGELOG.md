@@ -2,6 +2,16 @@
 
 All notable user-facing changes should be recorded here.
 
+## v0.1.0-preview.2 - 2026-05-02
+
+Preview update focused on upstream parity and operational hardening.
+
+- Gated shape admission by actual catalog state so stale handles use initial-request limits.
+- Kept replication connections alive while fanout is applying large batches.
+- Exposed configured admission-control limits on `/metrics`.
+- Updated Compose Postgres volume mounts for Postgres 18 compatibility.
+- Added dependent-shape coverage for complex boolean subquery move tags.
+
 ## v0.1.0-preview.1 - 2026-05-02
 
 Initial public preview.
