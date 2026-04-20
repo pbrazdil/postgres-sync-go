@@ -10,20 +10,101 @@ It targets the read path: syncing Shapes of Postgres data out to existing Electr
 
 > Status: preview / shadow-ready. `postgres-sync-go` is usable for local development, protocol evaluation, and side-by-side shadow runs. It is not yet recommended as a primary production replacement without workload-specific parity and recovery validation.
 
-## Naming
+## Standalone usage
 
-The repository and module are named `postgres-sync-go` for searchability and clarity. The command is named `postgres-sync`; the public Go package is named `pgsync` because Go package identifiers cannot contain hyphens and `pgsync.New(...)` keeps embedded usage readable.
+Build the binary:
 
-Recommended names:
+```bash
+go build ./cmd/postgres-sync
+```
 
-| Surface | Name |
+Run with a minimal config:
+
+```bash
+export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
+export SYNC_POOLED_DATABASE_URL="$DATABASE_URL"
+export SYNC_SECRET='dev-secret'
+export SYNC_PORT=3000
+export SYNC_STORAGE_MODE=memory
+
+go run ./cmd/postgres-sync
+```
+
+For local testing without a shared secret:
+
+```bash
+export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
+export SYNC_INSECURE=true
+
+go run ./cmd/postgres-sync
+```
+
+Check health:
+
+```bash
+curl http://localhost:3000/v1/health
+```
+
+Health states:
+
+| State | Meaning |
 | --- | --- |
-| GitHub repository | `github.com/pbrazdil/postgres-sync-go` |
-| Go module | `github.com/pbrazdil/postgres-sync-go` |
-| Public package | `github.com/pbrazdil/postgres-sync-go/pkg/pgsync` |
-| Binary | `postgres-sync` |
-| Docker image | `postgres-sync-go:local` |
-| Metrics prefix | `postgres_sync_go` |
+| `starting` | process is booting |
+| `waiting` | process is up, but replication is not currently active |
+| `active` | query and replication runtime is active |
+
+`/v1/health` returns:
+
+| HTTP status | Runtime status |
+| --- | --- |
+| `200` | `active` |
+| `202` | `starting` or `waiting` |
+
+## Embedded usage
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+
+	"github.com/pbrazdil/postgres-sync-go/pkg/pgsync"
+)
+
+func main() {
+	cfg := pgsync.DefaultConfig()
+	cfg.DatabaseURL = "postgres://postgres:postgres@localhost:5432/app?sslmode=disable"
+	cfg.PooledDatabaseURL = cfg.DatabaseURL
+	cfg.Secret = "dev-secret"
+	cfg.Storage.Mode = pgsync.StorageModeMemory
+
+	engine, err := pgsync.New(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := engine.Start(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		_ = engine.Close(context.Background())
+	}()
+
+	log.Fatal(http.ListenAndServe(":3000", engine.Handler()))
+}
+```
+
+Public API:
+
+```go
+pgsync.New(Config) (*Engine, error)
+(*Engine).Start(context.Context) error
+(*Engine).Handler() http.Handler
+(*Engine).Status() pgsync.Status
+(*Engine).Close(context.Context) error
+```
 
 ## Why postgres-sync-go?
 
@@ -115,56 +196,6 @@ Notes:
 - `DATABASE_URL` should point to a direct Postgres connection, not a transaction-pooled proxy, because `postgres-sync-go` also uses it for logical replication.
 - `SYNC_POOLED_DATABASE_URL` can point to a pooled query endpoint if you want separate query and replication connections.
 
-## Standalone usage
-
-Build the binary:
-
-```bash
-go build ./cmd/postgres-sync
-```
-
-Run with a minimal config:
-
-```bash
-export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
-export SYNC_POOLED_DATABASE_URL="$DATABASE_URL"
-export SYNC_SECRET='dev-secret'
-export SYNC_PORT=3000
-export SYNC_STORAGE_MODE=memory
-
-go run ./cmd/postgres-sync
-```
-
-For local testing without a shared secret:
-
-```bash
-export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
-export SYNC_INSECURE=true
-
-go run ./cmd/postgres-sync
-```
-
-Check health:
-
-```bash
-curl http://localhost:3000/v1/health
-```
-
-Health states:
-
-| State | Meaning |
-| --- | --- |
-| `starting` | process is booting |
-| `waiting` | process is up, but replication is not currently active |
-| `active` | query and replication runtime is active |
-
-`/v1/health` returns:
-
-| HTTP status | Runtime status |
-| --- | --- |
-| `200` | `active` |
-| `202` | `starting` or `waiting` |
-
 ## Docker
 
 Build the container image:
@@ -210,52 +241,6 @@ Example request:
 
 ```bash
 curl 'http://127.0.0.1:43100/v1/shape?table=items&offset=-1&secret=dev-secret'
-```
-
-## Embedded usage
-
-```go
-package main
-
-import (
-	"context"
-	"log"
-	"net/http"
-
-	"github.com/pbrazdil/postgres-sync-go/pkg/pgsync"
-)
-
-func main() {
-	cfg := pgsync.DefaultConfig()
-	cfg.DatabaseURL = "postgres://postgres:postgres@localhost:5432/app?sslmode=disable"
-	cfg.PooledDatabaseURL = cfg.DatabaseURL
-	cfg.Secret = "dev-secret"
-	cfg.Storage.Mode = pgsync.StorageModeMemory
-
-	engine, err := pgsync.New(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := engine.Start(context.Background()); err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		_ = engine.Close(context.Background())
-	}()
-
-	log.Fatal(http.ListenAndServe(":3000", engine.Handler()))
-}
-```
-
-Public API:
-
-```go
-pgsync.New(Config) (*Engine, error)
-(*Engine).Start(context.Context) error
-(*Engine).Handler() http.Handler
-(*Engine).Status() pgsync.Status
-(*Engine).Close(context.Context) error
 ```
 
 ## HTTP surface
@@ -428,71 +413,6 @@ Heavier gates:
 ./scripts/harness-check.sh --all
 ```
 
-## E2E harness
-
-The repo includes a small end-to-end harness for exercising `postgres-sync-go` against a seeded Postgres database and comparing protocol output.
-
-Useful entrypoints:
-
-| Script | Purpose |
-| --- | --- |
-| `./test/e2e/start-both.sh` | Starts both sync services side by side against the same Postgres instance for manual inspection. |
-| `./test/e2e/start-both-docker.sh` | Starts dockerized Postgres and both sync services side by side and streams container logs. |
-| `./test/e2e/manual_curls.sh` | Ready-made curl commands for health, snapshots, subset requests, continuations, long-poll, SSE, and partitioned tables. |
-| `./test/e2e/compare.sh` | Runs the current scenario set one implementation at a time, normalizes unstable headers and IDs, and diffs the results. |
-| `./test/e2e/compare-docker.sh` | Runs the same compare flow using Docker containers instead of host `go run` and `mix run`. |
-| `./test/e2e/validate-postgres-sync-go-docker.sh` | Runs lifecycle checks for disk restart continuity, deterministic must-refetch on corrupt persisted state, and health degradation/recovery across replication disconnects. |
-| `./test/e2e/shadow-client-docker.sh` | Runs an unchanged compatible TypeScript client against dockerized `postgres-sync-go` and asserts client-observed Shape state plus dependent subquery stream events. |
-
-The current differential matrix covers:
-
-- health
-- snapshots
-- subset requests
-- subset subquery rejection
-- `offset=now` continuations
-- long-poll
-- SSE insert delivery and keepalives
-- truncate invalidation
-- subquery feature-flag rejection
-- dependent-Shape move-in/move-out live replay
-- handle-definition mismatch
-- overload handling
-- `log=full`
-- `log=changes_only`
-- `replica=full`
-- partitioned-root fanout
-- child-partition fanout
-
-The current shadow-client matrix covers:
-
-- initial snapshots
-- filtered snapshots
-- column projections
-- long-poll inserts
-- SSE updates
-- dependent-Shape move-in and move-out stream events
-- partition-root live fanout
-
-Artifacts are written under `test/e2e/_artifacts/<timestamp>/` and include raw request/response files, normalized outputs, Postgres debug snapshots, and per-service logs.
-
-## Constraints
-
-- This is the open-source sync-service surface, not Electric Cloud.
-- The query path still accepts raw `where` and related filter strings and passes them through to Postgres. There is no full Electric query planner or SQL validator yet.
-- Publication handling is currently automatic and uses `FOR ALL TABLES`.
-- Metrics are minimal.
-- The main compatibility target is existing HTTP clients, not a new direct Go materialization API.
-
-## Known issues
-
-- The repo has a real protocol differential runner, lifecycle validator, and shadow-client validator, but the covered matrix is still too small for cutover.
-- Cross-table dependent live semantics are not fully implemented.
-- `tagged_subqueries` is recognized for config compatibility. `postgres-sync-go` emits stable dependency tags for refreshable subquery Shapes, but complex nested or negated dependency plans still need broader parity coverage.
-- Shapes that cannot be safely refreshed are handled conservatively and may still force refetch rather than risk stale results.
-- Disk-mode restart continuity and corrupt-state recovery are covered by the Docker validator, but not yet by long-running shadow traffic with a representative workload.
-- Standalone config still has a few env-loading gaps, notably listen host and metrics path.
-
 ## Roadmap
 
 Near-term work:
@@ -520,6 +440,19 @@ go vet ./...
 ```
 
 The current preview version is `v0.1.0-preview.1`.
+
+## Naming reference
+
+The repository and module are named `postgres-sync-go` for searchability and clarity. The command is named `postgres-sync`; the public Go package is named `pgsync` because Go package identifiers cannot contain hyphens and `pgsync.New(...)` keeps embedded usage readable.
+
+| Surface | Name |
+| --- | --- |
+| GitHub repository | `github.com/pbrazdil/postgres-sync-go` |
+| Go module | `github.com/pbrazdil/postgres-sync-go` |
+| Public package | `github.com/pbrazdil/postgres-sync-go/pkg/pgsync` |
+| Binary | `postgres-sync` |
+| Docker image | `postgres-sync-go:local` |
+| Metrics prefix | `postgres_sync_go` |
 
 ## License and attribution
 
