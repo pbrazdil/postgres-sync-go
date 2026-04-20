@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/petrbrazdil/pulsesync/internal/config"
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/config"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
 )
 
 var electricHeaders = []string{
@@ -88,7 +88,7 @@ func WriteOverloadedWithRequest(w http.ResponseWriter, req ShapeRequest, limits 
 
 func WriteShapeShellUnavailable(w http.ResponseWriter) {
 	WriteError(w, http.StatusServiceUnavailable, map[string]any{
-		"message": "PulseSync protocol shell is active, but shape serving is not implemented yet",
+		"message": "postgres-sync-go protocol shell is active, but shape serving is not implemented yet",
 		"code":    "not_implemented",
 	})
 }

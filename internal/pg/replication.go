@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
-	"github.com/petrbrazdil/pulsesync/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
 )
 
 const replicationStandbyTimeout = 10 * time.Second
@@ -39,7 +39,7 @@ func (r *Runtime) ensureReplication(ctx context.Context) error {
 	pool := r.queryPool
 	r.mu.RUnlock()
 	if pool == nil {
-		return errors.New("PulseSync engine has not been started")
+		return errors.New("postgres-sync-go engine has not been started")
 	}
 
 	if err := r.ensurePublication(ctx, pool); err != nil {
@@ -648,15 +648,15 @@ func (r *Runtime) handleReplicationError(err error, conn *pgconn.PgConn) {
 }
 
 func (r *Runtime) publicationName() string {
-	return compactIdentifier("pulsesync_"+r.cfg.ReplicationStreamID+"_pub", 63)
+	return compactIdentifier("postgres_sync_go_"+r.cfg.ReplicationStreamID+"_pub", 63)
 }
 
 func (r *Runtime) replicationSlotName() string {
 	if r.store != nil && r.store.Kind() == "disk" {
-		return compactIdentifier("pulsesync_"+r.cfg.ReplicationStreamID+"_slot", 63)
+		return compactIdentifier("postgres_sync_go_"+r.cfg.ReplicationStreamID+"_slot", 63)
 	}
 
-	base := compactIdentifier("pulsesync_"+r.cfg.ReplicationStreamID+"_slot", 48)
+	base := compactIdentifier("postgres_sync_go_"+r.cfg.ReplicationStreamID+"_slot", 48)
 	return compactIdentifier(fmt.Sprintf("%s_%x", base, time.Now().UnixNano()), 63)
 }
 
@@ -677,7 +677,7 @@ func compactIdentifier(value string, maxLen int) string {
 	compact := builder.String()
 	compact = strings.Trim(compact, "_")
 	if compact == "" {
-		compact = "pulsesync"
+		compact = "postgres_sync_go"
 	}
 	if len(compact) > maxLen {
 		compact = compact[:maxLen]

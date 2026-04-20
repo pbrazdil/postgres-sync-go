@@ -3,7 +3,7 @@ package shapes
 import (
 	"testing"
 
-	"github.com/petrbrazdil/pulsesync/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
 )
 
 func TestManagerChangesOnlyRefreshProducesUpdate(t *testing.T) {

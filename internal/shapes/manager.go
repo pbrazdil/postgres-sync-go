@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
-	"github.com/petrbrazdil/pulsesync/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/sqlinspect"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
 )
 
 type Relation struct {

@@ -16,9 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/petrbrazdil/pulsesync/internal/config"
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
-	"github.com/petrbrazdil/pulsesync/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/config"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
 )
 
 type ServiceStatus string
@@ -287,7 +287,7 @@ func (r *Runtime) ensurePool(ctx context.Context) (*pgxpool.Pool, error) {
 	}
 	if r.queryPoolConfig == nil {
 		r.mu.RUnlock()
-		return nil, errors.New("PulseSync engine has not been started")
+		return nil, errors.New("postgres-sync-go engine has not been started")
 	}
 	configCopy := r.queryPoolConfig.Copy()
 	r.mu.RUnlock()

@@ -1,4 +1,4 @@
-module github.com/petrbrazdil/pulsesync
+module github.com/pbrazdil/postgres-sync-go
 
 go 1.26.0
 

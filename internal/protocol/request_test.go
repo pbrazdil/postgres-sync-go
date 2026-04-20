@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
 )
 
 func TestParseShapeRequestMergesPostSubsetBody(t *testing.T) {

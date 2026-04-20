@@ -1,4 +1,4 @@
-package pulsesync
+package pgsync
 
 import (
 	"context"
@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"sync"
 
-	internalconfig "github.com/petrbrazdil/pulsesync/internal/config"
-	"github.com/petrbrazdil/pulsesync/internal/httpapi"
-	"github.com/petrbrazdil/pulsesync/internal/pg"
-	"github.com/petrbrazdil/pulsesync/internal/protocol"
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
-	"github.com/petrbrazdil/pulsesync/internal/storage"
-	"github.com/petrbrazdil/pulsesync/internal/telemetry"
+	internalconfig "github.com/pbrazdil/postgres-sync-go/internal/config"
+	"github.com/pbrazdil/postgres-sync-go/internal/httpapi"
+	"github.com/pbrazdil/postgres-sync-go/internal/pg"
+	"github.com/pbrazdil/postgres-sync-go/internal/protocol"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/telemetry"
 )
 
 type Status = pg.ServiceStatus
@@ -45,7 +45,7 @@ func New(cfg Config) (*Engine, error) {
 	case internalconfig.StorageModeDisk:
 		dir := cfg.Storage.Dir
 		if dir == "" {
-			dir = filepath.Join(".", ".pulsesync")
+			dir = filepath.Join(".", ".postgres-sync-go")
 		}
 
 		diskStore, err := storage.NewDiskStore(dir)
@@ -64,7 +64,7 @@ func New(cfg Config) (*Engine, error) {
 	runtime := pg.NewRuntime(cfg, shapeManager, storeImpl)
 	telemetryProvider := telemetry.NewProvider(Version, cfg.Telemetry)
 	protocolService := protocol.NewService(cfg, shapeManager, runtime)
-	router := httpapi.NewRouter("PulseSync/"+Version, protocolService, telemetryProvider, runtime)
+	router := httpapi.NewRouter("postgres-sync-go/"+Version, protocolService, telemetryProvider, runtime)
 
 	return &Engine{
 		cfg:       cfg,

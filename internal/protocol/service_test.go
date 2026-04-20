@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/petrbrazdil/pulsesync/internal/config"
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
-	"github.com/petrbrazdil/pulsesync/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/config"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
 )
 
 func TestServiceInitialSnapshot(t *testing.T) {
@@ -1052,7 +1052,7 @@ func (b stubBackend) Snapshot(ctx context.Context, request shapes.SnapshotReques
 
 func newTestService(backend shapes.Backend) (*Service, *shapes.Manager) {
 	cfg := config.DefaultConfig()
-	cfg.DatabaseURL = "postgresql://postgres:postgres@localhost:5432/pulsesync"
+	cfg.DatabaseURL = "postgresql://postgres:postgres@localhost:5432/postgres_sync_go"
 	cfg.PooledDatabaseURL = cfg.DatabaseURL
 	cfg.Secret = "test-secret"
 	cfg.AllowShapeDeletion = true
