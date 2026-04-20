@@ -144,7 +144,6 @@ Implemented today:
 
 Still missing before parity signoff:
 
-- broader dependent-Shape tracking for complex nested, negated, or multi-hop subquery plans
 - longer-running shadow validation for client reconnects, storage growth, WAL retention, and production recovery drills
 - production-traffic shadow validation beyond the current seeded client matrix
 
@@ -421,7 +420,7 @@ Near-term work:
 - add more real integration coverage around unsupported live invalidation paths
 - validate long-running restart continuity and slot behavior under representative shadow traffic
 - add manual publication mode
-- improve unsupported-Shape detection with a more robust dependency model
+- keep hardening unsupported-Shape detection for long-tail SQL expressions
 - expand telemetry and Prometheus metrics
 - polish Docker packaging and add deployment examples
 

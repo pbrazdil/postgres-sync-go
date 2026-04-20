@@ -8,7 +8,7 @@ This file is the current engineering quality snapshot for agents and humans. Upd
 | --- | --- | --- | --- |
 | Public API and config | B+ | Unit tests and env parsing coverage | More `SYNC_*` flags may still be needed |
 | HTTP protocol shell | B+ | Compat tests plus Docker diff matrix | Long-tail cache/header combinations |
-| Live fanout | B | PK-targeted refresh and current dependent replay scenarios pass | Complex nested, negated, or multi-hop dependent subqueries |
+| Live fanout | B+ | PK-targeted refresh plus nested, negated, and multi-hop dependent tracking tests pass | Long-tail SQL expressions and broader differential coverage |
 | Disk continuity | B | Docker lifecycle validator covers restart/corrupt/reconnect cases | Storage growth and WAL retention under long runs |
 | E2E harness | A- | Protocol differential matrix, lifecycle checks, and shadow-client validation are executable and artifacted | Matrix is still representative, not exhaustive |
 | Telemetry | C | Minimal metrics endpoint exists | Logs/metrics are not rich enough for production debugging |
@@ -40,5 +40,5 @@ This runs local checks, the Docker protocol comparison matrix, the postgres-sync
 - Supported Docker differential matrix passes.
 - Disk lifecycle validation passes.
 - Representative unchanged compatible TypeScript clients run against postgres-sync-go in shadow mode with no correctness diffs for the supported scenario matrix.
-- Known unsupported dependent-subquery cases force refetch or are documented with conservative behavior.
+- Known unsupported dependent-subquery cases force refetch, wildcard invalidation, or documented conservative behavior.
 - Operational concerns have evidence: metrics/log usefulness, WAL retention behavior, storage growth behavior, and recovery drills.
