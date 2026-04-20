@@ -17,18 +17,26 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
     columns_snapshot
     subset_get_snapshot
     subset_post_snapshot
+    subset_subquery_rejected
     offset_now_then_insert
     offset_now_then_update
     offset_now_then_delete
     live_longpoll_insert
     live_sse_insert
+    live_sse_keepalive
     truncate_then_must_refetch
-    subquery_move_in_must_refetch
+    subquery_rejected_without_feature_flag
+    subquery_move_in_live_replay
+    subquery_move_out_live_replay
+    handle_definition_mismatch_must_refetch
+    log_full_offset_now_then_update
     log_changes_only_initial_snapshot
     log_changes_only_offset_now_then_update
+    replica_full_offset_now_then_update
     overload_existing_live_request
     partition_root_snapshot
     partition_offset_now_then_insert
+    partition_child_offset_now_then_insert
   )
 fi
 
@@ -98,9 +106,9 @@ start_pulsesync_compose() {
 }
 
 start_electric_compose() {
-  log "starting dockerized Electric on port $ELECTRIC_PORT"
+  log "starting dockerized Electric on port $COMPARE_PORT"
   compose_cmd up -d --build --no-deps electric >/dev/null
-  if ! wait_for_active_health "http://127.0.0.1:${ELECTRIC_PORT}/v1/health"; then
+  if ! wait_for_active_health "http://127.0.0.1:${COMPARE_PORT}/v1/health"; then
     compose_cmd logs --no-color electric >&2 || true
     return 1
   fi
@@ -120,7 +128,7 @@ stop_compose_service() {
       port=$PULSE_PORT
       ;;
     electric)
-      port=$ELECTRIC_PORT
+      port=$COMPARE_PORT
       ;;
   esac
 
@@ -154,7 +162,7 @@ run_impl() {
     electric)
       service_name="electric"
       start_electric_compose
-      base_url="http://127.0.0.1:${ELECTRIC_PORT}"
+      base_url="http://127.0.0.1:${COMPARE_PORT}"
       ;;
     *)
       echo "unknown implementation: $impl" >&2
@@ -175,7 +183,7 @@ compare_scenario() {
   log "running docker scenario: $scenario"
   configure_scenario_runtime_config "$scenario"
   configure_one_off_service_ports
-  log "scenario ports: pulsesync=$PULSE_PORT electric=$ELECTRIC_PORT"
+  log "scenario ports: pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
   mkdir -p "$scenario_dir"
 
   run_impl pulsesync "$scenario" "$scenario_dir/pulsesync"
@@ -195,7 +203,7 @@ main() {
   require_cmd docker
   configure_one_off_docker_ports
 
-  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$ELECTRIC_PORT"
+  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
   log "using compose project: $COMPOSE_PROJECT_NAME"
 
   start_postgres_compose
