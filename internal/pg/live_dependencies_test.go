@@ -36,6 +36,9 @@ func TestLiveDependenciesForDefinitionSubqueryTracksRelatedRelation(t *testing.T
 	if definitionSupportsTargetedRefresh(definition) {
 		t.Fatalf("definitionSupportsTargetedRefresh() = true, want false")
 	}
+	if !definitionSupportsDependentRefresh(definition) {
+		t.Fatalf("definitionSupportsDependentRefresh() = false, want true")
+	}
 
 	dependencies := liveDependenciesForDefinition(definition)
 	if !dependencies.Unsupported {
@@ -140,6 +143,47 @@ id IN (
 		shapes.Relation{Schema: "audit", Table: "flag_reasons"},
 	) {
 		t.Fatalf("definitionRequiresInvalidationForRelation() = false, want true for multi-hop dependency root")
+	}
+
+	if definitionSupportsDependentRefresh(definition) {
+		t.Fatalf("definitionSupportsDependentRefresh() = true, want false for complex dependency")
+	}
+}
+
+func TestDefinitionSupportsDependentRefreshRejectsNestedAndNegatedPlans(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		where string
+	}{
+		{
+			name:  "nested",
+			where: "id IN (SELECT item_id FROM item_flags WHERE item_id IN (SELECT item_id FROM item_flags))",
+		},
+		{
+			name:  "negated",
+			where: "id NOT IN (SELECT item_id FROM item_flags)",
+		},
+		{
+			name:  "exists",
+			where: "EXISTS (SELECT 1 FROM item_flags WHERE item_flags.item_id = items.id)",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			definition := shapes.Definition{
+				Relation: shapes.Relation{Schema: "public", Table: "items"},
+				Where:    tt.where,
+			}
+			if definitionSupportsDependentRefresh(definition) {
+				t.Fatalf("definitionSupportsDependentRefresh() = true, want false")
+			}
+		})
 	}
 }
 

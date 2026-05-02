@@ -28,6 +28,10 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
     subquery_rejected_without_feature_flag
     subquery_move_in_live_replay
     subquery_move_out_live_replay
+    subquery_nested_multi_hop_move_in_live_replay
+    subquery_nested_multi_hop_move_out_live_replay
+    subquery_negated_move_in_live_replay
+    subquery_negated_move_out_live_replay
     handle_definition_mismatch_must_refetch
     log_full_offset_now_then_update
     log_changes_only_initial_snapshot

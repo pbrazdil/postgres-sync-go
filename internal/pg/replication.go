@@ -566,6 +566,13 @@ func (r *Runtime) refreshDependentShapesForRelation(ctx context.Context, metadat
 		if _, ok := refreshed[state.Handle]; ok {
 			continue
 		}
+		if !definitionSupportsDependentRefresh(state.Definition) {
+			if _, err := r.shapes.Delete(state.Handle); err != nil && !errors.Is(err, shapes.ErrShapeNotFound) && !errors.Is(err, shapes.ErrShapeDeleted) {
+				return err
+			}
+			refreshed[state.Handle] = struct{}{}
+			continue
+		}
 
 		snapshot, err := r.Snapshot(ctx, shapes.SnapshotRequest{
 			Definition: state.Definition,

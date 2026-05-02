@@ -1,8 +1,13 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+DROP SCHEMA IF EXISTS audit CASCADE;
 DROP TABLE IF EXISTS partitioned_items CASCADE;
+DROP TABLE IF EXISTS item_blocks CASCADE;
+DROP TABLE IF EXISTS item_flag_audits CASCADE;
 DROP TABLE IF EXISTS item_flags CASCADE;
 DROP TABLE IF EXISTS items CASCADE;
+
+CREATE SCHEMA audit;
 
 CREATE TABLE items (
   id UUID PRIMARY KEY,
@@ -31,6 +36,42 @@ INSERT INTO item_flags (item_id, enabled) VALUES
   ('00000000-0000-0000-0000-000000000001', TRUE),
   ('00000000-0000-0000-0000-000000000002', FALSE),
   ('00000000-0000-0000-0000-000000000003', TRUE);
+
+CREATE TABLE audit.flag_reasons (
+  id INTEGER PRIMARY KEY,
+  enabled BOOLEAN NOT NULL,
+  label TEXT NOT NULL
+);
+
+ALTER TABLE audit.flag_reasons REPLICA IDENTITY FULL;
+
+INSERT INTO audit.flag_reasons (id, enabled, label) VALUES
+  (1, TRUE, 'trusted'),
+  (2, FALSE, 'pending-review');
+
+CREATE TABLE item_flag_audits (
+  item_id UUID NOT NULL,
+  reason_id INTEGER NOT NULL,
+  approved BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (item_id, reason_id)
+);
+
+ALTER TABLE item_flag_audits REPLICA IDENTITY FULL;
+
+INSERT INTO item_flag_audits (item_id, reason_id, approved) VALUES
+  ('00000000-0000-0000-0000-000000000001', 1, TRUE),
+  ('00000000-0000-0000-0000-000000000002', 2, TRUE),
+  ('00000000-0000-0000-0000-000000000003', 1, TRUE);
+
+CREATE TABLE item_blocks (
+  item_id UUID PRIMARY KEY,
+  reason TEXT NOT NULL
+);
+
+ALTER TABLE item_blocks REPLICA IDENTITY FULL;
+
+INSERT INTO item_blocks (item_id, reason) VALUES
+  ('00000000-0000-0000-0000-000000000003', 'archived-review');
 
 CREATE TABLE partitioned_items (
   tenant_id INTEGER NOT NULL,

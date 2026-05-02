@@ -153,6 +153,10 @@ test/e2e/_artifacts/<timestamp>/
 - `subquery_rejected_without_feature_flag`
 - `subquery_move_in_live_replay`
 - `subquery_move_out_live_replay`
+- `subquery_nested_multi_hop_move_in_live_replay`
+- `subquery_nested_multi_hop_move_out_live_replay`
+- `subquery_negated_move_in_live_replay`
+- `subquery_negated_move_out_live_replay`
 - `handle_definition_mismatch_must_refetch`
 - `log_full_offset_now_then_update`
 - `log_changes_only_initial_snapshot`
@@ -193,7 +197,6 @@ test/e2e/_artifacts/<timestamp>/
 
 The harness is intentionally small today, but it is structured to grow into a fuller parity suite. The next useful additions are:
 
-- complex nested and negated dependent-shape matrices
 - shape deletion scenarios
 - a broader matrix for replica modes and column projections
 - broader disk corruption and recovery matrices

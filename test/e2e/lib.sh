@@ -204,7 +204,12 @@ configure_scenario_runtime_config() {
   SCENARIO_FEATURE_FLAGS=
 
   case "$scenario" in
-    subquery_move_in_live_replay|subquery_move_out_live_replay)
+    subquery_move_in_live_replay|\
+    subquery_move_out_live_replay|\
+    subquery_nested_multi_hop_move_in_live_replay|\
+    subquery_nested_multi_hop_move_out_live_replay|\
+    subquery_negated_move_in_live_replay|\
+    subquery_negated_move_out_live_replay)
       SCENARIO_FEATURE_FLAGS='allow_subqueries,tagged_subqueries'
       ;;
     subquery_move_in_must_refetch)
@@ -381,6 +386,18 @@ ORDER BY id;
 
 SELECT item_id, enabled
 FROM item_flags
+ORDER BY item_id;
+
+SELECT id, enabled, label
+FROM audit.flag_reasons
+ORDER BY id;
+
+SELECT item_id, reason_id, approved
+FROM item_flag_audits
+ORDER BY item_id, reason_id;
+
+SELECT item_id, reason
+FROM item_blocks
 ORDER BY item_id;
 
 SELECT tenant_id, seq, value
@@ -707,6 +724,51 @@ scenario_subquery_move_out_live_replay() {
   sleep 1
 
   capture_http "GET" "$base_url/v1/shape?table=items&where=${encoded_where}&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-after-related-update"
+}
+
+complex_dependent_where_encoded() {
+  printf '%s' \
+    'id%20IN%20%28SELECT%20item_id%20FROM%20item_flag_audits%20' \
+    'WHERE%20approved%20%3D%20true%20AND%20reason_id%20IN%20%28' \
+    'SELECT%20id%20FROM%20audit.flag_reasons%20WHERE%20enabled%20%3D%20true' \
+    '%29%20AND%20item_id%20NOT%20IN%20%28SELECT%20item_id%20FROM%20item_blocks%29%29'
+}
+
+scenario_complex_dependent_live_replay() {
+  local base_url=$1
+  local dir=$2
+  local sql_file=$3
+  local step_name=$4
+  local encoded_where
+  encoded_where=$(complex_dependent_where_encoded)
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&where=${encoded_where}&secret=$SECRET" "$dir/01-bootstrap"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/$sql_file"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&where=${encoded_where}&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/${step_name}"
+}
+
+scenario_subquery_nested_multi_hop_move_in_live_replay() {
+  scenario_complex_dependent_live_replay "$1" "$2" "enable_dependent_reason.sql" "02-after-reason-enable"
+}
+
+scenario_subquery_nested_multi_hop_move_out_live_replay() {
+  scenario_complex_dependent_live_replay "$1" "$2" "disable_dependent_reason.sql" "02-after-reason-disable"
+}
+
+scenario_subquery_negated_move_in_live_replay() {
+  scenario_complex_dependent_live_replay "$1" "$2" "unblock_dependent_item.sql" "02-after-block-delete"
+}
+
+scenario_subquery_negated_move_out_live_replay() {
+  scenario_complex_dependent_live_replay "$1" "$2" "block_dependent_item.sql" "02-after-block-insert"
 }
 
 scenario_handle_definition_mismatch_must_refetch() {

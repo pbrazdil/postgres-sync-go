@@ -240,6 +240,55 @@ func definitionSupportsTargetedRefresh(def shapes.Definition) bool {
 	return true
 }
 
+func definitionSupportsDependentRefresh(def shapes.Definition) bool {
+	dependencies := liveDependenciesForDefinition(def)
+	if !dependencies.Unsupported || dependencies.Wildcard {
+		return false
+	}
+
+	relatedRelations := 0
+	for _, relation := range dependencies.Relations {
+		if relation != def.Relation {
+			relatedRelations++
+		}
+	}
+	if relatedRelations != 1 {
+		return false
+	}
+
+	for _, clause := range definitionDependencyClauses(def) {
+		if dependencyClauseRequiresInvalidation(clause) {
+			return false
+		}
+	}
+	return true
+}
+
+func dependencyClauseRequiresInvalidation(clause string) bool {
+	sanitized := sqlinspect.SanitizeClause(clause)
+	if !sqlinspect.ContainsDependencyKeyword(sanitized) {
+		return false
+	}
+
+	selectCount := 0
+	for _, token := range tokenizeDependencyClause(sanitized) {
+		switch {
+		case dependencyTokenKeyword(token, "select"):
+			selectCount++
+		case dependencyTokenKeyword(token, "not"),
+			dependencyTokenKeyword(token, "exists"),
+			dependencyTokenKeyword(token, "with"),
+			dependencyTokenKeyword(token, "join"),
+			dependencyTokenKeyword(token, "lateral"),
+			dependencyTokenKeyword(token, "union"),
+			dependencyTokenKeyword(token, "intersect"),
+			dependencyTokenKeyword(token, "except"):
+			return true
+		}
+	}
+	return selectCount != 1
+}
+
 type liveDependencySet struct {
 	Unsupported bool
 	Wildcard    bool
