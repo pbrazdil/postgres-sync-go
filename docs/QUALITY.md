@@ -9,9 +9,9 @@ This file is the current engineering quality snapshot for agents and humans. Upd
 | Public API and config | B+ | Unit tests and env parsing coverage | More `SYNC_*` flags may still be needed |
 | HTTP protocol shell | B+ | Compat tests plus Docker diff matrix | Long-tail cache/header combinations |
 | Live fanout | B+ | PK-targeted refresh plus nested, negated, and multi-hop dependent tracking tests pass | Long-tail SQL expressions and broader differential coverage |
-| Disk continuity | B | Docker lifecycle validator covers restart/corrupt/reconnect cases | Storage growth and WAL retention under long runs |
+| Disk continuity | B+ | Docker lifecycle validator covers restart, slot loss, corruption, reconnect, schema invalidation, compaction, and metrics cases | Storage growth and WAL retention under long runs |
 | E2E harness | A- | Protocol differential matrix, lifecycle checks, and shadow-client validation are executable and artifacted | Matrix is still representative, not exhaustive |
-| Telemetry | C | Minimal metrics endpoint exists | Logs/metrics are not rich enough for production debugging |
+| Telemetry | B- | Metrics cover replication lag, reconnects, invalidations, storage, checkpoint state, admission, and overloads | Operator dashboards and structured event-field polish |
 | Packaging | B- | Dockerfile and Compose exist | Release packaging and deployment docs need hardening |
 
 ## Required Gates By Change Type

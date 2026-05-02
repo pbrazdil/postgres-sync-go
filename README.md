@@ -138,9 +138,10 @@ Implemented today:
 - rejection of subquery Shapes unless `allow_subqueries` is enabled
 - dependent-Shape live replay for refreshable subquery Shapes, including move-in and move-out events
 - Dockerized differential comparison for the current supported scenario set
-- Dockerized lifecycle validation for disk restart continuity, corrupt-Shape recovery, and reconnect health transitions
+- Dockerized lifecycle validation for disk restart continuity, persistent slot loss, corrupt-Shape recovery, reconnect health transitions, schema-change invalidation, storage compaction, and runtime metrics
 - Dockerized shadow-client validation with an unchanged compatible TypeScript client, including reconnect, process restart, disk continuity, invalidation/refetch, and mixed concurrent Shape scenarios
 - conservative invalidation and must-refetch behavior when correctness cannot be proven
+- runtime metrics for replication lag, reconnects, invalidations, storage size, checkpoint state, request admission, and overloads
 
 Still missing before parity signoff:
 
@@ -255,9 +256,9 @@ Implemented routes:
 | `POST /v1/shape` | Shape request with JSON subset body |
 | `DELETE /v1/shape` | Shape deletion when explicitly enabled |
 | `OPTIONS /v1/shape` | CORS preflight; unauthenticated |
-| `GET /metrics` | minimal metrics surface |
+| `GET /metrics` | Prometheus-style runtime metrics |
 
-`/metrics` currently exposes build info and admission-limit gauges. It is not a full Prometheus instrumentation surface yet.
+`/metrics` exposes build info, admission limits, request/overload counters, replication status, WAL-retention gauges, reconnect/error counters, invalidation counters, storage size, chunk counts, and persisted checkpoint labels.
 
 ## `/v1/shape` request support
 
@@ -419,7 +420,7 @@ Near-term work:
 - add more real integration coverage around unsupported live invalidation paths
 - add manual publication mode
 - keep hardening unsupported-Shape detection for long-tail SQL expressions
-- expand telemetry and Prometheus metrics
+- expand telemetry with operator-facing structured event fields and dashboards
 - polish Docker packaging and add deployment examples
 
 ## Development

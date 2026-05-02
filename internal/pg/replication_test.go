@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pglogrepl"
 )
 
 func TestApplyWithPeriodicKeepaliveDuringBlockedApply(t *testing.T) {
@@ -58,5 +60,25 @@ func TestApplyWithPeriodicKeepaliveDuringBlockedApply(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timed out waiting for applyWithPeriodicKeepalive")
+	}
+}
+
+func TestStandbyStatusUpdateConfirmsWriteFlushAndApplyPositions(t *testing.T) {
+	t.Parallel()
+
+	lsn := pglogrepl.LSN(12345)
+	status := standbyStatusUpdate(lsn)
+
+	if status.WALWritePosition != lsn {
+		t.Fatalf("WALWritePosition = %s, want %s", status.WALWritePosition, lsn)
+	}
+	if status.WALFlushPosition != lsn {
+		t.Fatalf("WALFlushPosition = %s, want %s", status.WALFlushPosition, lsn)
+	}
+	if status.WALApplyPosition != lsn {
+		t.Fatalf("WALApplyPosition = %s, want %s", status.WALApplyPosition, lsn)
+	}
+	if status.ClientTime.IsZero() {
+		t.Fatalf("ClientTime is zero")
 	}
 }

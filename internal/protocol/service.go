@@ -17,11 +17,21 @@ type Service struct {
 	shapes    *shapes.Manager
 	backend   shapes.Backend
 	admission *admissionController
+	metrics   MetricsRecorder
+}
+
+type MetricsRecorder interface {
+	RecordShapeRequest(kind string)
+	RecordShapeOverload(kind string)
 }
 
 const defaultSSEKeepaliveIntervalMS = 21_000
 
-func NewService(cfg config.Config, manager *shapes.Manager, backend shapes.Backend) *Service {
+func NewService(cfg config.Config, manager *shapes.Manager, backend shapes.Backend, recorders ...MetricsRecorder) *Service {
+	var recorder MetricsRecorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
 	return &Service{
 		cfg:     cfg,
 		shapes:  manager,
@@ -30,6 +40,7 @@ func NewService(cfg config.Config, manager *shapes.Manager, backend shapes.Backe
 			cfg.MaxConcurrentRequests.Initial,
 			cfg.MaxConcurrentRequests.Existing,
 		),
+		metrics: recorder,
 	}
 }
 
@@ -84,10 +95,16 @@ func (s *Service) HandleShape(w http.ResponseWriter, r *http.Request) {
 	admissionKind := s.admissionKind(request, definition)
 	release, ok := s.admission.acquire(admissionKind)
 	if !ok {
+		if s.metrics != nil {
+			s.metrics.RecordShapeOverload(string(admissionKind))
+		}
 		WriteOverloadedWithKind(w, admissionKind, s.cfg.MaxConcurrentRequests)
 		return
 	}
 	defer release()
+	if s.metrics != nil {
+		s.metrics.RecordShapeRequest(string(admissionKind))
+	}
 
 	switch request.Offset {
 	case "-1":

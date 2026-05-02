@@ -135,6 +135,78 @@ func TestDiskStoreCorruptShapeDoesNotAbortCatalogLoad(t *testing.T) {
 	}
 }
 
+func TestDiskStoreCompactsDeletedShapeChunks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store, err := NewDiskStore(dir)
+	if err != nil {
+		t.Fatalf("NewDiskStore() error = %v", err)
+	}
+	defer func() {
+		_ = store.Close(context.Background())
+	}()
+
+	shape := PersistedShape{
+		Handle:        "shape-1",
+		Hash:          "hash-1",
+		Definition:    mustJSON(t, map[string]any{"table": "items"}),
+		Schema:        mustJSON(t, map[string]any{"id": map[string]any{"type": "uuid", "pk_index": 0}}),
+		Snapshot:      mustJSON(t, []any{}),
+		Materialized:  mustJSON(t, map[string]any{}),
+		CurrentOffset: "0_0",
+		LastAccess:    time.Unix(1_700_000_000, 0).UTC(),
+		Generation:    1,
+		Changes: []json.RawMessage{
+			mustJSON(t, map[string]any{"headers": map[string]any{"operation": "insert"}, "key": "1"}),
+		},
+	}
+	if err := store.SaveShape(context.Background(), shape); err != nil {
+		t.Fatalf("SaveShape() error = %v", err)
+	}
+
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.ChunkCount == 0 || stats.ChangeCount == 0 || stats.ChunkBytes == 0 {
+		t.Fatalf("stats before delete = %+v, want persisted chunk data", stats)
+	}
+
+	shape.Deleted = true
+	if err := store.SaveShape(context.Background(), shape); err != nil {
+		t.Fatalf("SaveShape(deleted) error = %v", err)
+	}
+
+	stats, err = store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() after delete error = %v", err)
+	}
+	if stats.ChunkCount != 0 || stats.ChangeCount != 0 || stats.DeletedShapeCount != 1 {
+		t.Fatalf("stats after delete = %+v, want deleted shape with no chunks", stats)
+	}
+
+	orphanDir := filepath.Join(dir, "chunks", "orphan")
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	orphanPath := filepath.Join(orphanDir, "000000.json")
+	if err := os.WriteFile(orphanPath, []byte(`[{}]`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	result, err := store.Compact(context.Background())
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+	if result.RemovedChunks != 1 || result.RemovedBytes == 0 {
+		t.Fatalf("Compact() = %+v, want orphan chunk removal", result)
+	}
+	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+		t.Fatalf("orphan chunk still exists, stat err = %v", err)
+	}
+}
+
 func mustJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 

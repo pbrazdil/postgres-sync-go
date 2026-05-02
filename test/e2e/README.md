@@ -24,7 +24,7 @@ It is designed for two workflows:
 - `compare-docker.sh`
   Runs the same compare flow against Docker containers instead of host processes.
 - `validate-postgres-sync-go-docker.sh`
-  Runs postgres-sync-go-only lifecycle validation for disk restart continuity, corrupt persisted-shape recovery, and reconnect health transitions.
+  Runs postgres-sync-go-only lifecycle validation for disk restart continuity, persistent slot loss, corrupt persisted-shape recovery, reconnect health transitions, schema-change invalidation, storage compaction, and runtime metrics.
 - `shadow-client-docker.sh`
   Runs an unchanged compatible TypeScript client against dockerized postgres-sync-go and asserts client-observed shape state through live updates, reconnects, process restarts, disk continuity, invalidation/refetch, and mixed concurrent Shapes.
 - `shadow-client.mjs`
@@ -184,7 +184,10 @@ test/e2e/_artifacts/<timestamp>/
 
 - `disk_restart_continuity`
 - `disk_corrupt_shape_recovery`
+- `persistent_slot_loss_recovery`
 - `reconnect_health_and_continuation`
+- `schema_change_invalidates_shape`
+- `storage_compaction_and_metrics`
 
 ## Current Shadow-Client Scenarios
 
@@ -216,5 +219,5 @@ test/e2e/_artifacts/<timestamp>/
 
 The harness is intentionally small today, but it is structured to grow into a fuller parity suite. The next useful additions are:
 
-- broader disk corruption and recovery matrices
+- broader long-run WAL-retention and storage-growth matrices
 - longer-running production-traffic shadow-client runs

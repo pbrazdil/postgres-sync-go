@@ -114,8 +114,21 @@ func (s *DiskStore) SaveShape(ctx context.Context, shape PersistedShape) error {
 	if err != nil {
 		return err
 	}
+	changes := shape.Changes
 
-	if len(shape.Changes) < existingCount {
+	if shape.Deleted {
+		if err := s.removeChunks(existingChunks); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE handle = ?`, shape.Handle); err != nil {
+			return err
+		}
+		existingCount = 0
+		nextSeq = 0
+		changes = nil
+	}
+
+	if len(changes) < existingCount {
 		if err := s.removeChunks(existingChunks); err != nil {
 			return err
 		}
@@ -151,13 +164,13 @@ func (s *DiskStore) SaveShape(ctx context.Context, shape PersistedShape) error {
 		shape.LastAccess.UTC().Unix(),
 		shape.Generation,
 		boolToInt(shape.Deleted),
-		len(shape.Changes),
+		len(changes),
 	); err != nil {
 		return err
 	}
 
-	if len(shape.Changes) > existingCount {
-		chunkPath, err := s.writeChunk(shape.Handle, nextSeq, shape.Changes[existingCount:])
+	if len(changes) > existingCount {
+		chunkPath, err := s.writeChunk(shape.Handle, nextSeq, changes[existingCount:])
 		if err != nil {
 			return err
 		}
@@ -167,7 +180,7 @@ func (s *DiskStore) SaveShape(ctx context.Context, shape PersistedShape) error {
 			shape.Handle,
 			nextSeq,
 			chunkPath,
-			len(shape.Changes)-existingCount,
+			len(changes)-existingCount,
 		); err != nil {
 			return err
 		}
@@ -218,6 +231,74 @@ func (s *DiskStore) SaveRuntimeCheckpoint(ctx context.Context, checkpoint Runtim
 		checkpoint.DBName,
 	)
 	return err
+}
+
+func (s *DiskStore) Stats(ctx context.Context) (StoreStats, error) {
+	stats := StoreStats{Kind: s.Kind()}
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT
+		   COUNT(*),
+		   COALESCE(SUM(CASE WHEN deleted = 0 THEN 1 ELSE 0 END), 0),
+		   COALESCE(SUM(CASE WHEN deleted = 1 THEN 1 ELSE 0 END), 0)
+		 FROM shapes`,
+	).Scan(&stats.ShapeCount, &stats.ActiveShapeCount, &stats.DeletedShapeCount); err != nil {
+		return StoreStats{}, err
+	}
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*), COALESCE(SUM(message_count), 0) FROM chunks`,
+	).Scan(&stats.ChunkCount, &stats.ChangeCount); err != nil {
+		return StoreStats{}, err
+	}
+
+	stats.MetadataBytes = fileSize(filepath.Join(s.dir, "metadata.sqlite"))
+	stats.ChunkBytes = directorySize(s.chunkDir)
+	stats.TotalBytes = stats.MetadataBytes + stats.ChunkBytes
+
+	checkpoint, ok, err := s.LoadRuntimeCheckpoint(ctx)
+	if err != nil {
+		return StoreStats{}, err
+	}
+	stats.HasCheckpoint = ok
+	if ok {
+		stats.Checkpoint = checkpoint
+	}
+	return stats, nil
+}
+
+func (s *DiskStore) Compact(ctx context.Context) (CompactionResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CompactionResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM chunks
+		 WHERE handle NOT IN (SELECT handle FROM shapes)
+		    OR handle IN (SELECT handle FROM shapes WHERE deleted = 1)`,
+	); err != nil {
+		return CompactionResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE shapes SET change_count = 0 WHERE deleted = 1`); err != nil {
+		return CompactionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CompactionResult{}, err
+	}
+
+	livePaths, err := s.liveChunkPaths(ctx)
+	if err != nil {
+		return CompactionResult{}, err
+	}
+	result, err := s.removeUnreferencedChunkFiles(livePaths)
+	if err != nil {
+		return result, err
+	}
+	_ = s.removeEmptyChunkDirs()
+	return result, nil
 }
 
 func (s *DiskStore) Close(context.Context) error {
@@ -368,6 +449,94 @@ func (s *DiskStore) removeChunks(paths []string) error {
 		}
 	}
 	return nil
+}
+
+func (s *DiskStore) liveChunkPaths(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM chunks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	paths := map[string]struct{}{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths[filepath.Clean(path)] = struct{}{}
+	}
+	return paths, rows.Err()
+}
+
+func (s *DiskStore) removeUnreferencedChunkFiles(livePaths map[string]struct{}) (CompactionResult, error) {
+	result := CompactionResult{}
+	err := filepath.WalkDir(s.chunkDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		cleanPath := filepath.Clean(path)
+		if _, ok := livePaths[cleanPath]; ok {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr == nil {
+			result.RemovedBytes += info.Size()
+		}
+		if err := os.Remove(cleanPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		result.RemovedChunks++
+		return nil
+	})
+	return result, err
+}
+
+func (s *DiskStore) removeEmptyChunkDirs() error {
+	entries, err := os.ReadDir(s.chunkDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.chunkDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if strings.Contains(err.Error(), "directory not empty") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func directorySize(dir string) int64 {
+	var size int64
+	_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return nil
+		}
+		size += info.Size()
+		_ = path
+		return nil
+	})
+	return size
 }
 
 func sanitizePath(value string) string {

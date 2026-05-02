@@ -14,7 +14,10 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
   SCENARIOS=(
     disk_restart_continuity
     disk_corrupt_shape_recovery
+    persistent_slot_loss_recovery
     reconnect_health_and_continuation
+    schema_change_invalidates_shape
+    storage_compaction_and_metrics
   )
 fi
 
@@ -257,6 +260,124 @@ scenario_reconnect_health_and_continuation() {
   assert_contains "$dir/04-continuation/normalized.json" '"status": 200' "continuation after reconnect should succeed"
   assert_contains "$dir/04-continuation/normalized.json" '"operation": "insert"' "continuation after reconnect should include insert event"
   assert_contains "$dir/04-continuation/normalized.json" '"control": "up-to-date"' "continuation after reconnect should flush up-to-date"
+
+  capture_pg_debug "$dir/db-after"
+  stop_compose_service postgres-sync-go "$dir/final-stop"
+}
+
+scenario_persistent_slot_loss_recovery() {
+  local dir="$VALIDATION_DIR/persistent_slot_loss_recovery"
+  local base_url="http://127.0.0.1:${SYNC_GO_PORT}"
+  mkdir -p "$dir"
+
+  set_postgres_sync_go_storage disk "$dir/storage"
+  reset_stack
+  capture_pg_debug "$dir/db-before"
+
+  start_postgres_sync_go_compose "$dir/01-start"
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/01-offset-now"
+  local handle
+  local offset
+  local slot_name
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  stop_compose_service postgres-sync-go "$dir/01-stop"
+  slot_name=$(psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -Atc "SELECT slot_name FROM pg_replication_slots WHERE slot_name = 'postgres_sync_go_${SYNC_GO_STREAM_ID}_slot' LIMIT 1")
+  assert_equals "$slot_name" "postgres_sync_go_${SYNC_GO_STREAM_ID}_slot" "expected persistent disk slot"
+  psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -c "SELECT pg_drop_replication_slot('${slot_name}')" >/dev/null
+
+  start_postgres_sync_go_compose "$dir/02-restart-after-slot-drop"
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/03-stale-handle-after-slot-drop"
+  assert_contains "$dir/03-stale-handle-after-slot-drop/normalized.json" '"status": 409' "missing persistent slot should force refetch"
+  assert_contains "$dir/03-stale-handle-after-slot-drop/normalized.json" '"control": "must-refetch"' "missing persistent slot should emit must-refetch"
+  local replacement_handle
+  replacement_handle=$(extract_header "$dir/03-stale-handle-after-slot-drop/headers.txt" "electric-handle")
+  assert_not_equals "$replacement_handle" "$handle" "missing persistent slot should rotate shape handle"
+
+  capture_http "GET" "$base_url/metrics" "$dir/04-metrics"
+  assert_contains "$dir/04-metrics/body.txt" 'postgres_sync_go_invalidations_total{reason="slot_missing"} 1' "metrics should count slot-missing invalidation"
+
+  capture_pg_debug "$dir/db-after"
+  stop_compose_service postgres-sync-go "$dir/final-stop"
+}
+
+scenario_schema_change_invalidates_shape() {
+  local dir="$VALIDATION_DIR/schema_change_invalidates_shape"
+  local base_url="http://127.0.0.1:${SYNC_GO_PORT}"
+  mkdir -p "$dir"
+
+  set_postgres_sync_go_storage memory "$dir/storage"
+  reset_stack
+  capture_pg_debug "$dir/db-before"
+
+  start_postgres_sync_go_compose "$dir/01-start"
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/01-offset-now"
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<SQL >/dev/null
+ALTER TABLE items ADD COLUMN runtime_note TEXT;
+UPDATE items
+SET runtime_note = 'schema-change'
+WHERE id = '00000000-0000-0000-0000-000000000001';
+SQL
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-after-schema-change"
+  assert_contains "$dir/02-after-schema-change/normalized.json" '"status": 409' "schema changes should force refetch for all-column shapes"
+  assert_contains "$dir/02-after-schema-change/normalized.json" '"control": "must-refetch"' "schema changes should emit must-refetch"
+
+  capture_http "GET" "$base_url/metrics" "$dir/03-metrics"
+  assert_contains "$dir/03-metrics/body.txt" 'postgres_sync_go_invalidations_total{reason="schema_change"} 1' "metrics should count schema-change invalidation"
+
+  capture_pg_debug "$dir/db-after"
+  stop_compose_service postgres-sync-go "$dir/final-stop"
+}
+
+scenario_storage_compaction_and_metrics() {
+  local dir="$VALIDATION_DIR/storage_compaction_and_metrics"
+  local base_url="http://127.0.0.1:${SYNC_GO_PORT}"
+  mkdir -p "$dir"
+
+  set_postgres_sync_go_storage disk "$dir/storage"
+  reset_stack
+  mkdir -p "$SYNC_GO_STORAGE_BIND_DIR/chunks/orphan"
+  printf '[{}]' >"$SYNC_GO_STORAGE_BIND_DIR/chunks/orphan/000000.json"
+  capture_pg_debug "$dir/db-before"
+
+  start_postgres_sync_go_compose "$dir/01-start"
+  if [ -e "$SYNC_GO_STORAGE_BIND_DIR/chunks/orphan/000000.json" ]; then
+    echo "startup compaction did not remove orphan chunk" >&2
+    exit 1
+  fi
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/01-offset-now"
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/insert_item.sql"
+  sleep 1
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-continuation"
+  assert_contains "$dir/02-continuation/normalized.json" '"operation": "insert"' "continuation should create a persisted change chunk"
+
+  capture_http "GET" "$base_url/metrics" "$dir/03-metrics-with-chunk"
+  assert_contains "$dir/03-metrics-with-chunk/body.txt" 'postgres_sync_go_storage_shapes{state="active",kind="disk"} 1' "metrics should expose active disk shapes"
+  assert_contains "$dir/03-metrics-with-chunk/body.txt" 'postgres_sync_go_storage_chunks{kind="files",store="disk"} 1' "metrics should expose persisted chunk count"
+  assert_contains "$dir/03-metrics-with-chunk/body.txt" 'postgres_sync_go_wal_retained_bytes' "metrics should expose WAL retention gauge"
+
+  run_sql_file "$E2E_DIR/sql/truncate_items.sql"
+  sleep 1
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/04-after-truncate"
+  assert_contains "$dir/04-after-truncate/normalized.json" '"status": 409' "truncate should invalidate the shape"
+
+  capture_http "GET" "$base_url/metrics" "$dir/05-metrics-after-invalidation"
+  assert_contains "$dir/05-metrics-after-invalidation/body.txt" 'postgres_sync_go_storage_shapes{state="deleted",kind="disk"} 1' "metrics should expose deleted disk shapes"
+  assert_contains "$dir/05-metrics-after-invalidation/body.txt" 'postgres_sync_go_storage_chunks{kind="files",store="disk"} 0' "deleted shapes should not retain change chunks"
 
   capture_pg_debug "$dir/db-after"
   stop_compose_service postgres-sync-go "$dir/final-stop"

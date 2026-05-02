@@ -56,14 +56,40 @@ func New(cfg Config) (*Engine, error) {
 	default:
 		return nil, errors.New("unsupported storage mode")
 	}
+	if _, err := storeImpl.Compact(context.Background()); err != nil {
+		_ = storeImpl.Close(context.Background())
+		return nil, err
+	}
 
 	shapeManager, err := shapes.NewManager(storeImpl)
 	if err != nil {
 		return nil, err
 	}
-	runtime := pg.NewRuntime(cfg, shapeManager, storeImpl)
 	telemetryProvider := telemetry.NewProvider(Version, cfg.Telemetry, cfg.MaxConcurrentRequests)
-	protocolService := protocol.NewService(cfg, shapeManager, runtime)
+	runtime := pg.NewRuntime(cfg, shapeManager, storeImpl)
+	telemetryProvider.AttachStore(storeImpl)
+	telemetryProvider.AttachRuntimeMetrics(func() telemetry.RuntimeMetrics {
+		snapshot := runtime.MetricsSnapshot()
+		return telemetry.RuntimeMetrics{
+			Status:               string(snapshot.Status),
+			ReplicationConnected: snapshot.ReplicationConnected,
+			ReplicationSlot:      snapshot.ReplicationSlot,
+			LastConfirmedLSN:     snapshot.LastConfirmedLSN,
+			LastConfirmedBytes:   snapshot.LastConfirmedBytes,
+			LastReceivedLSN:      snapshot.LastReceivedLSN,
+			LastReceivedBytes:    snapshot.LastReceivedBytes,
+			ServerWALEnd:         snapshot.ServerWALEnd,
+			ServerWALEndBytes:    snapshot.ServerWALEndBytes,
+			WALRetainedBytes:     snapshot.WALRetainedBytes,
+			Reconnects:           snapshot.Reconnects,
+			ReplicationErrors:    snapshot.ReplicationErrors,
+			ChangeBatches:        snapshot.ChangeBatches,
+			ChangeRecords:        snapshot.ChangeRecords,
+			Invalidations:        snapshot.Invalidations,
+			LastReplicationError: snapshot.LastReplicationError,
+		}
+	})
+	protocolService := protocol.NewService(cfg, shapeManager, runtime, telemetryProvider)
 	router := httpapi.NewRouter("postgres-sync-go/"+Version, protocolService, telemetryProvider, runtime)
 
 	return &Engine{

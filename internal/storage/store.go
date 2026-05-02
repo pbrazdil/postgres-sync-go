@@ -30,12 +30,33 @@ type RuntimeCheckpoint struct {
 	DBName           string
 }
 
+type StoreStats struct {
+	Kind              string
+	ShapeCount        int
+	ActiveShapeCount  int
+	DeletedShapeCount int
+	ChunkCount        int
+	ChangeCount       int
+	MetadataBytes     int64
+	ChunkBytes        int64
+	TotalBytes        int64
+	HasCheckpoint     bool
+	Checkpoint        RuntimeCheckpoint
+}
+
+type CompactionResult struct {
+	RemovedChunks int
+	RemovedBytes  int64
+}
+
 type Store interface {
 	Kind() string
 	LoadShapes(context.Context) ([]PersistedShape, error)
 	SaveShape(context.Context, PersistedShape) error
 	LoadRuntimeCheckpoint(context.Context) (RuntimeCheckpoint, bool, error)
 	SaveRuntimeCheckpoint(context.Context, RuntimeCheckpoint) error
+	Stats(context.Context) (StoreStats, error)
+	Compact(context.Context) (CompactionResult, error)
 	Close(context.Context) error
 }
 
@@ -99,6 +120,45 @@ func (s *MemoryStore) SaveRuntimeCheckpoint(_ context.Context, checkpoint Runtim
 	cloned := checkpoint
 	s.checkpoint = &cloned
 	return nil
+}
+
+func (s *MemoryStore) Stats(context.Context) (StoreStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := StoreStats{
+		Kind:       s.Kind(),
+		ShapeCount: len(s.shapes),
+	}
+	for _, shape := range s.shapes {
+		if shape.Deleted {
+			stats.DeletedShapeCount++
+		} else {
+			stats.ActiveShapeCount++
+		}
+		stats.ChangeCount += len(shape.Changes)
+	}
+	if s.checkpoint != nil {
+		stats.HasCheckpoint = true
+		stats.Checkpoint = *s.checkpoint
+	}
+	return stats, nil
+}
+
+func (s *MemoryStore) Compact(context.Context) (CompactionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := CompactionResult{}
+	for handle, shape := range s.shapes {
+		if !shape.Deleted || len(shape.Changes) == 0 {
+			continue
+		}
+		result.RemovedChunks++
+		shape.Changes = nil
+		s.shapes[handle] = shape
+	}
+	return result, nil
 }
 
 func (s *MemoryStore) Close(context.Context) error {

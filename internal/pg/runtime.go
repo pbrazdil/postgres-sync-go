@@ -49,6 +49,34 @@ type Runtime struct {
 	runCancel         context.CancelFunc
 	runWG             sync.WaitGroup
 	relationCache     map[uint32]relationMetadata
+	lastConfirmedLSN  pglogrepl.LSN
+	lastReceivedLSN   pglogrepl.LSN
+	serverWALEnd      pglogrepl.LSN
+	reconnects        uint64
+	replicationErrors uint64
+	changeBatches     uint64
+	changeRecords     uint64
+	invalidations     map[string]uint64
+	lastReplError     string
+}
+
+type MetricsSnapshot struct {
+	Status               ServiceStatus
+	ReplicationConnected bool
+	ReplicationSlot      string
+	LastConfirmedLSN     string
+	LastConfirmedBytes   uint64
+	LastReceivedLSN      string
+	LastReceivedBytes    uint64
+	ServerWALEnd         string
+	ServerWALEndBytes    uint64
+	WALRetainedBytes     uint64
+	Reconnects           uint64
+	ReplicationErrors    uint64
+	ChangeBatches        uint64
+	ChangeRecords        uint64
+	Invalidations        map[string]uint64
+	LastReplicationError string
 }
 
 func NewRuntime(cfg config.Config, manager *shapes.Manager, store storage.Store) *Runtime {
@@ -58,6 +86,7 @@ func NewRuntime(cfg config.Config, manager *shapes.Manager, store storage.Store)
 		shapes:        manager,
 		store:         store,
 		relationCache: map[uint32]relationMetadata{},
+		invalidations: map[string]uint64{},
 	}
 }
 
@@ -96,6 +125,39 @@ func (r *Runtime) Status() ServiceStatus {
 	defer r.mu.RUnlock()
 
 	return r.status
+}
+
+func (r *Runtime) MetricsSnapshot() MetricsSnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	walRetained := uint64(0)
+	if r.serverWALEnd > r.lastConfirmedLSN {
+		walRetained = uint64(r.serverWALEnd - r.lastConfirmedLSN)
+	}
+	invalidations := make(map[string]uint64, len(r.invalidations))
+	for reason, count := range r.invalidations {
+		invalidations[reason] = count
+	}
+
+	return MetricsSnapshot{
+		Status:               r.status,
+		ReplicationConnected: r.replicationConn != nil,
+		ReplicationSlot:      r.replicationSlot,
+		LastConfirmedLSN:     r.lastConfirmedLSN.String(),
+		LastConfirmedBytes:   uint64(r.lastConfirmedLSN),
+		LastReceivedLSN:      r.lastReceivedLSN.String(),
+		LastReceivedBytes:    uint64(r.lastReceivedLSN),
+		ServerWALEnd:         r.serverWALEnd.String(),
+		ServerWALEndBytes:    uint64(r.serverWALEnd),
+		WALRetainedBytes:     walRetained,
+		Reconnects:           r.reconnects,
+		ReplicationErrors:    r.replicationErrors,
+		ChangeBatches:        r.changeBatches,
+		ChangeRecords:        r.changeRecords,
+		Invalidations:        invalidations,
+		LastReplicationError: r.lastReplError,
+	}
 }
 
 func (r *Runtime) Close(context.Context) error {

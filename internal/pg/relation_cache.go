@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -61,6 +62,10 @@ func (r *Runtime) cacheRelationMetadata(ctx context.Context, relationID uint32, 
 	r.relationCache[relationID] = metadata
 	r.mu.Unlock()
 
+	if err := r.invalidateShapesForSchemaChange(metadata); err != nil {
+		return relationMetadata{}, err
+	}
+
 	return metadata, nil
 }
 
@@ -114,6 +119,83 @@ func primaryKeyColumns(columns []describedColumn) []describedColumn {
 		return *pkColumns[i].PKIndex < *pkColumns[j].PKIndex
 	})
 	return pkColumns
+}
+
+func (r *Runtime) invalidateShapesForSchemaChange(metadata relationMetadata) error {
+	states := r.candidateShapes(metadata)
+	if len(states) == 0 {
+		return nil
+	}
+
+	invalidated := 0
+	for _, state := range states {
+		currentSchema := schemaForColumns(projectedColumns(metadata.Columns, state.Definition.Columns))
+		if shapeSchemasEqual(state.Schema, currentSchema) {
+			continue
+		}
+		deleted, err := r.shapes.Delete(state.Handle)
+		if err != nil && !errors.Is(err, shapes.ErrShapeNotFound) && !errors.Is(err, shapes.ErrShapeDeleted) {
+			return err
+		}
+		if deleted {
+			invalidated++
+		}
+	}
+	if invalidated > 0 {
+		r.recordInvalidation("schema_change", invalidated)
+		slog.Warn("invalidated shapes after relation schema changed", "relation", metadata.Relation.Schema+"."+metadata.Relation.Table, "invalidated", invalidated)
+	}
+	return nil
+}
+
+func schemaForColumns(columns []describedColumn) map[string]shapes.ColumnSchema {
+	schema := make(map[string]shapes.ColumnSchema, len(columns))
+	for _, column := range columns {
+		schema[column.Name] = shapes.ColumnSchema{
+			Type:    column.Type,
+			NotNull: column.NotNull,
+			PKIndex: clonePKIndex(column.PKIndex),
+		}
+	}
+	return schema
+}
+
+func shapeSchemasEqual(left map[string]shapes.ColumnSchema, right map[string]shapes.ColumnSchema) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, leftColumn := range left {
+		rightColumn, ok := right[name]
+		if !ok {
+			return false
+		}
+		if leftColumn.Type != rightColumn.Type || leftColumn.NotNull != rightColumn.NotNull {
+			return false
+		}
+		if !pkIndexesEqual(leftColumn.PKIndex, rightColumn.PKIndex) {
+			return false
+		}
+	}
+	return true
+}
+
+func pkIndexesEqual(left *int, right *int) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return *left == *right
+	}
+}
+
+func clonePKIndex(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func decodeTupleRow(columns []describedColumn, tuple *pglogrepl.TupleData) shapes.Row {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"sort"
 	"strings"
@@ -96,8 +97,12 @@ func (r *Runtime) ensureReplication(ctx context.Context) error {
 	r.replicationSlot = slotName
 	r.systemIdentity = sysident
 	r.relationCache = map[uint32]relationMetadata{}
+	r.lastConfirmedLSN = startLSN
+	r.lastReceivedLSN = startLSN
+	r.serverWALEnd = sysident.XLogPos
 	r.status = StatusActive
 	r.mu.Unlock()
+	slog.Info("postgres-sync-go replication active", "slot", slotName, "start_lsn", startLSN.String(), "storage", r.store.Kind())
 
 	r.replicationWG.Add(1)
 	go func() {
@@ -139,16 +144,22 @@ func (r *Runtime) prepareReplicationStart(
 	if r.store.Kind() == "disk" && hasCheckpoint {
 		validCheckpoint = checkpointCompatible(checkpoint, slotName, sysident, currentDatabaseName(r.cfg.DatabaseURL))
 		if !validCheckpoint {
-			if _, err := r.shapes.InvalidateAll(); err != nil {
+			invalidated, err := r.shapes.InvalidateAll()
+			if err != nil {
 				return "", 0, err
 			}
+			r.recordInvalidation("checkpoint_incompatible", len(invalidated))
+			slog.Warn("invalidated persisted shapes after incompatible replication checkpoint", "invalidated", len(invalidated), "slot", slotName)
 		}
 	}
 
 	if r.store.Kind() == "disk" && validCheckpoint && !slotExists {
-		if _, err := r.shapes.InvalidateAll(); err != nil {
+		invalidated, err := r.shapes.InvalidateAll()
+		if err != nil {
 			return "", 0, err
 		}
+		r.recordInvalidation("slot_missing", len(invalidated))
+		slog.Warn("invalidated persisted shapes after persistent replication slot was missing", "invalidated", len(invalidated), "slot", slotName)
 		validCheckpoint = false
 	}
 
@@ -235,10 +246,11 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 		if err := pglogrepl.SendStandbyStatusUpdate(
 			context.Background(),
 			conn,
-			pglogrepl.StandbyStatusUpdate{WALWritePosition: lsn},
+			standbyStatusUpdate(lsn),
 		); err != nil {
 			return err
 		}
+		r.recordConfirmedLSN(lsn)
 		nextStandbyMessageDeadline = time.Now().Add(replicationStandbyTimeout)
 		return nil
 	}
@@ -285,6 +297,7 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 			if pkm.ServerWALEnd > clientXLogPos {
 				clientXLogPos = pkm.ServerWALEnd
 			}
+			r.recordServerWALEnd(pkm.ServerWALEnd)
 			if pkm.ReplyRequested {
 				nextStandbyMessageDeadline = time.Time{}
 			}
@@ -307,7 +320,17 @@ func (r *Runtime) replicationLoop(ctx context.Context, conn *pgconn.PgConn, clie
 			if xld.WALStart > clientXLogPos {
 				clientXLogPos = xld.WALStart
 			}
+			r.recordReceivedLSN(xld.WALStart, clientXLogPos)
 		}
+	}
+}
+
+func standbyStatusUpdate(lsn pglogrepl.LSN) pglogrepl.StandbyStatusUpdate {
+	return pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: lsn,
+		WALFlushPosition: lsn,
+		WALApplyPosition: lsn,
+		ClientTime:       time.Now(),
 	}
 }
 
@@ -345,13 +368,17 @@ func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batc
 			if err := r.invalidateDependentShapesForRelation(metadata); err != nil {
 				return 0, err
 			}
-			if _, err := r.shapes.InvalidateByRelation(metadata.Relation); err != nil {
+			invalidated, err := r.shapes.InvalidateByRelation(metadata.Relation)
+			if err != nil {
 				return 0, err
 			}
+			r.recordInvalidation("truncate", len(invalidated))
 			if metadata.RootRelation != metadata.Relation {
-				if _, err := r.shapes.InvalidateByRelation(metadata.RootRelation); err != nil {
+				invalidated, err := r.shapes.InvalidateByRelation(metadata.RootRelation)
+				if err != nil {
 					return 0, err
 				}
+				r.recordInvalidation("truncate", len(invalidated))
 			}
 		}
 	case *pglogrepl.CommitMessage:
@@ -360,9 +387,14 @@ func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batc
 			if keepalive == nil {
 				return nil
 			}
-			return keepalive(msg.CommitLSN)
+			return keepalive(r.lastSafeConfirmedLSN())
 		}); err != nil {
 			return msg.TransactionEndLSN, err
+		}
+		if keepalive != nil {
+			if err := keepalive(msg.CommitLSN); err != nil {
+				return msg.TransactionEndLSN, err
+			}
 		}
 		batch.Reset(0)
 		return msg.TransactionEndLSN, nil
@@ -488,6 +520,7 @@ func (r *Runtime) recordDelete(batch *ChangeBatch, message *pglogrepl.DeleteMess
 
 func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error {
 	refreshedDependentShapes := map[string]struct{}{}
+	changeRecordCount := 0
 
 	for _, relationID := range batch.RelationIDs() {
 		metadata, ok := r.relationMetadata(relationID)
@@ -499,6 +532,7 @@ func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error
 		if len(changes) == 0 {
 			continue
 		}
+		changeRecordCount += len(changes)
 
 		keyRows := make([]shapes.Row, 0, len(changes))
 		for _, change := range changes {
@@ -520,9 +554,11 @@ func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error
 			if err != nil {
 				var missing shapes.RelationNotFoundError
 				if errors.As(err, &missing) {
-					if _, invalidateErr := r.shapes.InvalidateByRelation(state.Definition.Relation); invalidateErr != nil {
+					invalidated, invalidateErr := r.shapes.InvalidateByRelation(state.Definition.Relation)
+					if invalidateErr != nil {
 						return invalidateErr
 					}
+					r.recordInvalidation("relation_missing", len(invalidated))
 					continue
 				}
 				return err
@@ -543,6 +579,7 @@ func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error
 	}
 
 	if batch.CommitLSN > 0 {
+		r.recordChangeBatch(changeRecordCount)
 		r.mu.RLock()
 		slotName := r.replicationSlot
 		sysident := r.systemIdentity
@@ -570,6 +607,7 @@ func (r *Runtime) refreshDependentShapesForRelation(ctx context.Context, metadat
 			if _, err := r.shapes.Delete(state.Handle); err != nil && !errors.Is(err, shapes.ErrShapeNotFound) && !errors.Is(err, shapes.ErrShapeDeleted) {
 				return err
 			}
+			r.recordInvalidation("unsupported_dependency", 1)
 			refreshed[state.Handle] = struct{}{}
 			continue
 		}
@@ -584,6 +622,7 @@ func (r *Runtime) refreshDependentShapesForRelation(ctx context.Context, metadat
 				if _, deleteErr := r.shapes.Delete(state.Handle); deleteErr != nil && !errors.Is(deleteErr, shapes.ErrShapeNotFound) && !errors.Is(deleteErr, shapes.ErrShapeDeleted) {
 					return deleteErr
 				}
+				r.recordInvalidation("relation_missing", 1)
 				refreshed[state.Handle] = struct{}{}
 				continue
 			}
@@ -614,6 +653,7 @@ func (r *Runtime) invalidateDependentShapesForRelation(metadata relationMetadata
 		if _, err := r.shapes.Delete(state.Handle); err != nil && !errors.Is(err, shapes.ErrShapeNotFound) && !errors.Is(err, shapes.ErrShapeDeleted) {
 			return err
 		}
+		r.recordInvalidation("truncate_dependency", 1)
 	}
 	return nil
 }
@@ -705,11 +745,75 @@ func (r *Runtime) handleReplicationError(err error, conn *pgconn.PgConn) {
 		r.replicationCancel = nil
 		r.replicationSlot = ""
 		r.relationCache = map[uint32]relationMetadata{}
+		r.replicationErrors++
+		r.reconnects++
+		r.lastReplError = err.Error()
 		if r.status != StatusStopped {
 			r.status = StatusWaiting
 		}
 	}
-	_ = err
+	slog.Warn("postgres-sync-go replication disconnected", "error", err)
+}
+
+func (r *Runtime) lastSafeConfirmedLSN() pglogrepl.LSN {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.lastConfirmedLSN
+}
+
+func (r *Runtime) recordConfirmedLSN(lsn pglogrepl.LSN) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if lsn > r.lastConfirmedLSN {
+		r.lastConfirmedLSN = lsn
+	}
+}
+
+func (r *Runtime) recordReceivedLSN(received pglogrepl.LSN, serverEnd pglogrepl.LSN) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if received > r.lastReceivedLSN {
+		r.lastReceivedLSN = received
+	}
+	if serverEnd > r.serverWALEnd {
+		r.serverWALEnd = serverEnd
+	}
+}
+
+func (r *Runtime) recordServerWALEnd(lsn pglogrepl.LSN) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if lsn > r.serverWALEnd {
+		r.serverWALEnd = lsn
+	}
+}
+
+func (r *Runtime) recordChangeBatch(records int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.changeBatches++
+	if records > 0 {
+		r.changeRecords += uint64(records)
+	}
+}
+
+func (r *Runtime) recordInvalidation(reason string, count int) {
+	if count <= 0 {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.invalidations == nil {
+		r.invalidations = map[string]uint64{}
+	}
+	r.invalidations[reason] += uint64(count)
 }
 
 func (r *Runtime) publicationName() string {
