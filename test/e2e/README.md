@@ -26,7 +26,7 @@ It is designed for two workflows:
 - `validate-postgres-sync-go-docker.sh`
   Runs postgres-sync-go-only lifecycle validation for disk restart continuity, corrupt persisted-shape recovery, and reconnect health transitions.
 - `shadow-client-docker.sh`
-  Runs an unchanged compatible TypeScript client against dockerized postgres-sync-go and asserts client-observed shape state plus dependent subquery stream events.
+  Runs an unchanged compatible TypeScript client against dockerized postgres-sync-go and asserts client-observed shape state through live updates, reconnects, process restarts, disk continuity, invalidation/refetch, and mixed concurrent Shapes.
 - `shadow-client.mjs`
   Node runner used by `shadow-client-docker.sh`.
 - `cmd/syncdiff`
@@ -116,7 +116,13 @@ Run the TypeScript shadow-client validator:
 ./test/e2e/shadow-client-docker.sh
 ```
 
-By default, `shadow-client-docker.sh` installs `@electric-sql/client` into `test/e2e/_artifacts/.../shadow-client-package`. To use a local unchanged client checkout instead, set `SHADOW_CLIENT_DIR` to the package directory or `SHADOW_CLIENT_IMPORT` to a built ESM entrypoint.
+By default, `shadow-client-docker.sh` installs `@electric-sql/client` into `test/e2e/_artifacts/.../shadow-client-package` and runs postgres-sync-go in disk mode so client-observed continuity can survive process restarts. To use a local unchanged client checkout instead, set `SHADOW_CLIENT_DIR` to the package directory or `SHADOW_CLIENT_IMPORT` to a built ESM entrypoint.
+
+To run a smaller shadow-client slice, pass scenario names:
+
+```bash
+./test/e2e/shadow-client-docker.sh service_restart_disk_continuity client_refetch_after_invalidation
+```
 
 The Docker scripts choose free host ports by default and print the selected ports before startup. You can still pin them explicitly with `DB_PORT`, `SYNC_GO_PORT`, and `COMPARE_PORT`.
 
@@ -185,10 +191,15 @@ test/e2e/_artifacts/<timestamp>/
 - `snapshot`
 - `filtered_snapshot`
 - `columns_snapshot`
+- `columns_live_update`
 - `live_longpoll_insert`
 - `live_sse_update`
+- `reconnect_after_postgres_restart`
+- `service_restart_disk_continuity`
 - `subquery_move_in_out` through `ShapeStream` messages
+- `mixed_concurrent_shapes`
 - `partition_root_live_insert`
+- `client_refetch_after_invalidation`
 
 ## Notes
 
@@ -206,4 +217,4 @@ test/e2e/_artifacts/<timestamp>/
 The harness is intentionally small today, but it is structured to grow into a fuller parity suite. The next useful additions are:
 
 - broader disk corruption and recovery matrices
-- longer-running shadow-client runs with reconnect and restart cycles
+- longer-running production-traffic shadow-client runs

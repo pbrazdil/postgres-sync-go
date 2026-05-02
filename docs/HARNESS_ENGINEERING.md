@@ -55,6 +55,8 @@ Unchanged TypeScript client shadow validation:
 
 Direct entrypoint: `test/e2e/shadow-client-docker.sh`.
 
+The shadow-client runner uses the unchanged compatible TypeScript client package and runs postgres-sync-go in disk mode by default. It covers seeded snapshots, live long-poll/SSE updates, reconnect after Postgres restart, postgres-sync-go process restart continuity, invalidation/refetch, dependent subquery moves, partitions, and mixed concurrent Shapes.
+
 Everything available from the harness:
 
 ```bash

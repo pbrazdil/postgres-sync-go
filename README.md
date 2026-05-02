@@ -139,13 +139,13 @@ Implemented today:
 - dependent-Shape live replay for refreshable subquery Shapes, including move-in and move-out events
 - Dockerized differential comparison for the current supported scenario set
 - Dockerized lifecycle validation for disk restart continuity, corrupt-Shape recovery, and reconnect health transitions
-- Dockerized shadow-client validation with an unchanged compatible TypeScript client
+- Dockerized shadow-client validation with an unchanged compatible TypeScript client, including reconnect, process restart, disk continuity, invalidation/refetch, and mixed concurrent Shape scenarios
 - conservative invalidation and must-refetch behavior when correctness cannot be proven
 
 Still missing before parity signoff:
 
-- longer-running shadow validation for client reconnects, storage growth, WAL retention, and production recovery drills
 - production-traffic shadow validation beyond the current seeded client matrix
+- storage growth, WAL retention, and production recovery drills under sustained workloads
 
 ## Design goals
 
@@ -416,9 +416,7 @@ Heavier gates:
 
 Near-term work:
 
-- expand the protocol differential matrix with longer-running SSE, more replica modes, Shape deletion/rotation, and complex tagged dependent-Shape cases
 - add more real integration coverage around unsupported live invalidation paths
-- validate long-running restart continuity and slot behavior under representative shadow traffic
 - add manual publication mode
 - keep hardening unsupported-Shape detection for long-tail SQL expressions
 - expand telemetry and Prometheus metrics

@@ -14,6 +14,8 @@ const secret = process.env.SECRET ?? 'test-secret'
 const clientImport = process.env.SHADOW_CLIENT_IMPORT
 const timeoutMs = Number(process.env.SHADOW_CLIENT_TIMEOUT_MS ?? 15000)
 const resultFile = process.env.SHADOW_CLIENT_RESULT_FILE
+const composeProjectName = process.env.SHADOW_CLIENT_COMPOSE_PROJECT_NAME
+const composeFile = process.env.SHADOW_CLIENT_COMPOSE_FILE
 const requestedScenarios = new Set(
   (process.env.SHADOW_CLIENT_SCENARIOS ?? process.argv.slice(2).join(',') ?? '')
     .split(',')
@@ -50,6 +52,12 @@ function sqlFile(name) {
 
 function runSql(name) {
   execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', databaseUrl, '-f', sqlFile(name)], {
+    stdio: 'pipe',
+  })
+}
+
+function execSql(sql) {
+  execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', databaseUrl, '-c', sql], {
     stdio: 'pipe',
   })
 }
@@ -145,6 +153,52 @@ function createShape(params, options = {}) {
       await sleep(25)
     },
   }
+}
+
+function requireComposeControl(label) {
+  if (!composeProjectName || !composeFile) {
+    throw new Error(`${label} requires SHADOW_CLIENT_COMPOSE_PROJECT_NAME and SHADOW_CLIENT_COMPOSE_FILE`)
+  }
+}
+
+function compose(args, label) {
+  requireComposeControl(label)
+  execFileSync('docker', ['compose', '-p', composeProjectName, '-f', composeFile, ...args], {
+    stdio: 'pipe',
+  })
+}
+
+async function waitForHealthState(expected, label, ms = timeoutMs) {
+  const deadline = Date.now() + ms
+  let lastError
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(new URL('/v1/health', baseUrl))
+      const body = await response.json()
+      if (body.status === expected) {
+        return body
+      }
+      lastError = new Error(`${label}: expected health ${expected}, got ${body.status}`)
+    } catch (err) {
+      lastError = err
+    }
+    await sleep(500)
+  }
+  throw lastError ?? new Error(`${label}: timed out waiting for health ${expected}`)
+}
+
+async function restartSyncService(label) {
+  compose(['restart', 'postgres-sync-go'], label)
+  await waitForHealthState('active', `${label} active health`)
+}
+
+async function stopPostgres(label) {
+  compose(['stop', 'postgres'], label)
+}
+
+async function startPostgres(label) {
+  compose(['start', 'postgres'], label)
+  await waitForHealthState('active', `${label} active health`)
 }
 
 async function waitForStreamMessage(stream, predicate, label) {
@@ -256,6 +310,36 @@ await runShapeScenario('columns_snapshot', async () => {
   }
 })
 
+await runShapeScenario('columns_live_update', async () => {
+  const client = createShape({
+    table: 'items',
+    columns: ['id', 'value'],
+  })
+  try {
+    await withTimeout(client.shape.rows, 'columns live initial rows')
+    execSql(`
+      UPDATE items
+      SET value = 'gamma-columns-live'
+      WHERE id = '00000000-0000-0000-0000-000000000003'
+    `)
+    const rows = await waitForRows(
+      client.shape,
+      (currentRows) => {
+        const row = rowsByKey(currentRows).get('00000000-0000-0000-0000-000000000003')
+        return row?.value === 'gamma-columns-live'
+      },
+      'columns live update'
+    )
+    assert(
+      rows.every((row) => Object.keys(row).sort().join(',') === 'id,value'),
+      'columns_live_update: unexpected columns'
+    )
+    return { rows }
+  } finally {
+    await client.close()
+  }
+})
+
 await runShapeScenario('live_longpoll_insert', async () => {
   const client = createShape({ table: 'items' })
   try {
@@ -295,6 +379,81 @@ await runShapeScenario('live_sse_update', async () => {
     assert(updated?.value === 'alpha-updated', 'live_sse_update: updated value missing')
     assert(updated?.priority === 10, 'live_sse_update: updated priority missing')
     return { updated }
+  } finally {
+    await client.close()
+  }
+})
+
+await runShapeScenario('reconnect_after_postgres_restart', async () => {
+  const client = createShape({
+    table: 'items',
+    where: "category = 'shadow-reconnect'",
+  })
+  try {
+    await withTimeout(client.shape.rows, 'reconnect initial rows')
+    const handleBefore = client.stream.shapeHandle
+    assert(handleBefore, 'reconnect_after_postgres_restart: missing initial shape handle')
+
+    await stopPostgres('reconnect_after_postgres_restart stop postgres')
+    await waitForHealthState('waiting', 'reconnect waiting health')
+    await startPostgres('reconnect_after_postgres_restart start postgres')
+
+    execSql(`
+      INSERT INTO items (id, value, priority, archived, category, inserted_at)
+      VALUES ('00000000-0000-0000-0000-000000000030', 'shadow-reconnect', 30, FALSE, 'shadow-reconnect', '2025-01-30T00:00:00Z')
+    `)
+    const rows = await waitForRows(
+      client.shape,
+      (currentRows) => rowsByKey(currentRows).has('00000000-0000-0000-0000-000000000030'),
+      'reconnect after postgres restart'
+    )
+    assert(
+      client.stream.shapeHandle === handleBefore,
+      'reconnect_after_postgres_restart: shape handle changed across replication reconnect'
+    )
+    return { handle: client.stream.shapeHandle, rows }
+  } finally {
+    await client.close()
+  }
+})
+
+await runShapeScenario('service_restart_disk_continuity', async () => {
+  const client = createShape({
+    table: 'items',
+    where: "category = 'shadow-service-restart'",
+  })
+  try {
+    await withTimeout(client.shape.rows, 'service restart initial rows')
+    execSql(`
+      INSERT INTO items (id, value, priority, archived, category, inserted_at)
+      VALUES ('00000000-0000-0000-0000-000000000040', 'shadow-service-before', 40, FALSE, 'shadow-service-restart', '2025-02-01T00:00:00Z')
+    `)
+    await waitForRows(
+      client.shape,
+      (currentRows) => rowsByKey(currentRows).has('00000000-0000-0000-0000-000000000040'),
+      'service restart pre-restart row'
+    )
+    const handleBefore = client.stream.shapeHandle
+    assert(handleBefore, 'service_restart_disk_continuity: missing initial shape handle')
+
+    await restartSyncService('service_restart_disk_continuity restart postgres-sync-go')
+
+    execSql(`
+      INSERT INTO items (id, value, priority, archived, category, inserted_at)
+      VALUES ('00000000-0000-0000-0000-000000000041', 'shadow-service-after', 41, FALSE, 'shadow-service-restart', '2025-02-02T00:00:00Z')
+    `)
+    const rows = await waitForRows(
+      client.shape,
+      (currentRows) =>
+        rowsByKey(currentRows).has('00000000-0000-0000-0000-000000000040') &&
+        rowsByKey(currentRows).has('00000000-0000-0000-0000-000000000041'),
+      'service restart disk continuity'
+    )
+    assert(
+      client.stream.shapeHandle === handleBefore,
+      'service_restart_disk_continuity: disk mode should preserve shape handle across process restart'
+    )
+    return { handle: client.stream.shapeHandle, rows }
   } finally {
     await client.close()
   }
@@ -352,6 +511,80 @@ await runShapeScenario('subquery_move_in_out', async () => {
   }
 })
 
+await runShapeScenario('mixed_concurrent_shapes', async () => {
+  const allItems = createShape({ table: 'items' })
+  const filtered = createShape({
+    table: 'items',
+    where: "category = 'shadow-concurrent'",
+  })
+  const projected = createShape({
+    table: 'items',
+    columns: ['id', 'value'],
+    where: "category = 'shadow-concurrent'",
+  })
+  const dependent = createShape({
+    table: 'items',
+    where: 'id IN (SELECT item_id FROM item_flags WHERE enabled = true)',
+  })
+  const clients = [allItems, filtered, projected, dependent]
+  try {
+    await Promise.all(clients.map((client) => withTimeout(client.shape.rows, 'mixed concurrent initial rows')))
+    execSql(`
+      BEGIN;
+      INSERT INTO items (id, value, priority, archived, category, inserted_at) VALUES
+        ('00000000-0000-0000-0000-000000000020', 'shadow-concurrent-a', 20, FALSE, 'shadow-concurrent', '2025-01-20T00:00:00Z'),
+        ('00000000-0000-0000-0000-000000000021', 'shadow-concurrent-b', 21, FALSE, 'other-shadow', '2025-01-21T00:00:00Z');
+      INSERT INTO item_flags (item_id, enabled) VALUES
+        ('00000000-0000-0000-0000-000000000020', TRUE),
+        ('00000000-0000-0000-0000-000000000021', FALSE);
+      COMMIT;
+    `)
+
+    const [allRows, filteredRows, projectedRows, dependentRows] = await Promise.all([
+      waitForRows(
+        allItems.shape,
+        (rows) =>
+          rowsByKey(rows).has('00000000-0000-0000-0000-000000000020') &&
+          rowsByKey(rows).has('00000000-0000-0000-0000-000000000021'),
+        'mixed all-items shape'
+      ),
+      waitForRows(
+        filtered.shape,
+        (rows) =>
+          rowsByKey(rows).has('00000000-0000-0000-0000-000000000020') &&
+          !rowsByKey(rows).has('00000000-0000-0000-0000-000000000021'),
+        'mixed filtered shape'
+      ),
+      waitForRows(
+        projected.shape,
+        (rows) => rowsByKey(rows).get('00000000-0000-0000-0000-000000000020')?.value === 'shadow-concurrent-a',
+        'mixed projected shape'
+      ),
+      waitForRows(
+        dependent.shape,
+        (rows) =>
+          rowsByKey(rows).has('00000000-0000-0000-0000-000000000020') &&
+          !rowsByKey(rows).has('00000000-0000-0000-0000-000000000021'),
+        'mixed dependent shape'
+      ),
+    ])
+
+    assert(
+      projectedRows.every((row) => Object.keys(row).sort().join(',') === 'id,value'),
+      'mixed_concurrent_shapes: projected shape returned unexpected columns'
+    )
+
+    return {
+      all_count: allRows.length,
+      filtered_rows: filteredRows,
+      projected_rows: projectedRows,
+      dependent_count: dependentRows.length,
+    }
+  } finally {
+    await Promise.all(clients.map((client) => client.close()))
+  }
+})
+
 await runShapeScenario('partition_root_live_insert', async () => {
   const client = createShape({ table: 'partitioned_items' })
   try {
@@ -364,6 +597,30 @@ await runShapeScenario('partition_root_live_insert', async () => {
     )
     assertPartitionKeys(rows, ['1:10', '1:20', '1:130', '2:120'], 'partition_root_live_insert')
     return { rows }
+  } finally {
+    await client.close()
+  }
+})
+
+await runShapeScenario('client_refetch_after_invalidation', async () => {
+  const client = createShape({ table: 'items' })
+  try {
+    const initialRows = normalizeRows(await withTimeout(client.shape.rows, 'invalidation initial rows'))
+    assert(initialRows.length > 0, 'client_refetch_after_invalidation: expected initial rows before truncate')
+    const handleBefore = client.stream.shapeHandle
+    assert(handleBefore, 'client_refetch_after_invalidation: missing initial shape handle')
+
+    runSql('truncate_items.sql')
+    const rows = await waitForRows(
+      client.shape,
+      (currentRows) => currentRows.length === 0,
+      'client refetch after invalidation'
+    )
+    assert(
+      client.stream.shapeHandle && client.stream.shapeHandle !== handleBefore,
+      'client_refetch_after_invalidation: expected handle rotation after must-refetch'
+    )
+    return { previous_handle: handleBefore, current_handle: client.stream.shapeHandle, rows }
   } finally {
     await client.close()
   }

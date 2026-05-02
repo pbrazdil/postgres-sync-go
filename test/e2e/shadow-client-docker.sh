@@ -11,6 +11,8 @@ COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-postgres-sync-go-shadow-client-$(da
 SHADOW_CLIENT_PACKAGE_SPEC=${SHADOW_CLIENT_PACKAGE_SPEC:-@electric-sql/client}
 SHADOW_CLIENT_WORKDIR=${SHADOW_CLIENT_WORKDIR:-$ARTIFACTS_DIR/shadow-client-package}
 SHADOW_CLIENT_RESULT_FILE=${SHADOW_CLIENT_RESULT_FILE:-$ARTIFACTS_DIR/shadow-client/result.json}
+SHADOW_CLIENT_STORAGE_MODE=${SHADOW_CLIENT_STORAGE_MODE:-disk}
+SHADOW_CLIENT_TIMEOUT_MS=${SHADOW_CLIENT_TIMEOUT_MS:-45000}
 
 compose_cmd() {
   docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
@@ -84,11 +86,18 @@ main() {
   ensure_shadow_client
 
   configure_one_off_docker_ports
+  SYNC_GO_STORAGE_MODE=$SHADOW_CLIENT_STORAGE_MODE
+  SYNC_GO_STORAGE_BIND_DIR=${SHADOW_CLIENT_STORAGE_BIND_DIR:-$ARTIFACTS_DIR/shadow-client/storage}
+  SYNC_GO_STORAGE_DIR=${SHADOW_CLIENT_STORAGE_DIR:-/var/lib/postgres-sync-go}
   SCENARIO_FEATURE_FLAGS='allow_subqueries,tagged_subqueries'
+  export SYNC_GO_STORAGE_MODE
+  export SYNC_GO_STORAGE_BIND_DIR
+  export SYNC_GO_STORAGE_DIR
   export SCENARIO_FEATURE_FLAGS
 
   mkdir -p "$(dirname "$SHADOW_CLIENT_RESULT_FILE")"
   log "using one-off host ports: postgres=$DB_PORT postgres-sync-go=$SYNC_GO_PORT"
+  log "using postgres-sync-go storage: $SYNC_GO_STORAGE_MODE ($SYNC_GO_STORAGE_BIND_DIR)"
   log "using compose project: $COMPOSE_PROJECT_NAME"
   log "using shadow client: $SHADOW_CLIENT_IMPORT"
 
@@ -105,6 +114,9 @@ main() {
     SECRET="$SECRET" \
     SHADOW_CLIENT_IMPORT="$SHADOW_CLIENT_IMPORT" \
     SHADOW_CLIENT_RESULT_FILE="$SHADOW_CLIENT_RESULT_FILE" \
+    SHADOW_CLIENT_TIMEOUT_MS="$SHADOW_CLIENT_TIMEOUT_MS" \
+    SHADOW_CLIENT_COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" \
+    SHADOW_CLIENT_COMPOSE_FILE="$COMPOSE_FILE" \
     node "$SCRIPT_DIR/shadow-client.mjs" "$@"
 
   capture_pg_debug "$ARTIFACTS_DIR/shadow-client/db-after"
