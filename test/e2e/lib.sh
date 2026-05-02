@@ -4,28 +4,28 @@ set -euo pipefail
 
 E2E_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "$E2E_DIR/../.." && pwd)
-ELECTRIC_SYNC_DIR="$ROOT_DIR/electric/packages/sync-service"
-ELECTRIC_DOCKER_COMPOSE="$ELECTRIC_SYNC_DIR/dev/docker-compose.yml"
+COMPARE_SYNC_DIR="$ROOT_DIR/electric/packages/sync-service"
+COMPARE_DOCKER_COMPOSE="$COMPARE_SYNC_DIR/dev/docker-compose.yml"
 
 ARTIFACTS_DIR_DEFAULT="$E2E_DIR/_artifacts/$(date +%Y%m%d-%H%M%S)"
 ARTIFACTS_DIR=${ARTIFACTS_DIR:-$ARTIFACTS_DIR_DEFAULT}
 
 DB_PORT_ENV_SET=${DB_PORT+x}
 PULSE_PORT_ENV_SET=${PULSE_PORT+x}
-ELECTRIC_PORT_ENV_SET=${ELECTRIC_PORT+x}
+COMPARE_PORT_ENV_SET=${COMPARE_PORT+x}
 DATABASE_URL_ENV_SET=${DATABASE_URL+x}
 POOLED_DATABASE_URL_ENV_SET=${POOLED_DATABASE_URL+x}
 
 DB_PORT=${DB_PORT:-54321}
 PULSE_PORT=${PULSE_PORT:-3100}
-ELECTRIC_PORT=${ELECTRIC_PORT:-3200}
+COMPARE_PORT=${COMPARE_PORT:-3200}
 
 DATABASE_URL=${DATABASE_URL:-postgresql://postgres:password@localhost:${DB_PORT}/electric?sslmode=disable}
 POOLED_DATABASE_URL=${POOLED_DATABASE_URL:-$DATABASE_URL}
 SECRET=${SECRET:-test-secret}
 
 PULSE_STREAM_ID=${PULSE_STREAM_ID:-pulsecmp}
-ELECTRIC_STREAM_ID=${ELECTRIC_STREAM_ID:-electriccmp}
+COMPARE_STREAM_ID=${COMPARE_STREAM_ID:-electriccmp}
 
 PULSE_STORAGE_MODE=${PULSE_STORAGE_MODE:-memory}
 PULSE_STORAGE_DIR=${PULSE_STORAGE_DIR:-$ARTIFACTS_DIR/pulsesync-storage}
@@ -36,7 +36,7 @@ SCENARIO_LONG_POLL_TIMEOUT_MS=${SCENARIO_LONG_POLL_TIMEOUT_MS:-20000}
 SCENARIO_SSE_TIMEOUT_MS=${SCENARIO_SSE_TIMEOUT_MS:-60000}
 SCENARIO_FEATURE_FLAGS=${SCENARIO_FEATURE_FLAGS:-}
 USED_PULSE_PORTS=${USED_PULSE_PORTS:-}
-USED_ELECTRIC_PORTS=${USED_ELECTRIC_PORTS:-}
+USED_COMPARE_PORTS=${USED_COMPARE_PORTS:-}
 
 PULSEDIFF_BIN=${PULSEDIFF_BIN:-$ARTIFACTS_DIR/bin/pulsediff}
 
@@ -143,12 +143,12 @@ configure_one_off_docker_ports() {
 
   export DB_PORT
   export PULSE_PORT
-  export ELECTRIC_PORT
+  export COMPARE_PORT
   export DATABASE_URL
   export POOLED_DATABASE_URL
   export SECRET
   export PULSE_STREAM_ID
-  export ELECTRIC_STREAM_ID
+  export COMPARE_STREAM_ID
   export PULSE_STORAGE_MODE
   export PULSE_STORAGE_DIR
   export PULSE_STORAGE_BIND_DIR
@@ -164,15 +164,15 @@ configure_one_off_service_ports() {
     PULSE_PORT=$(find_fresh_port "${E2E_PULSE_PORT_RANGE_START:-43100}" "${E2E_PULSE_PORT_RANGE_END:-43199}" "$USED_PULSE_PORTS")
     USED_PULSE_PORTS="${USED_PULSE_PORTS:+$USED_PULSE_PORTS }$PULSE_PORT"
   fi
-  if [ -z "$ELECTRIC_PORT_ENV_SET" ]; then
-    ELECTRIC_PORT=$(find_fresh_port "${E2E_ELECTRIC_PORT_RANGE_START:-43200}" "${E2E_ELECTRIC_PORT_RANGE_END:-43299}" "$USED_ELECTRIC_PORTS")
-    USED_ELECTRIC_PORTS="${USED_ELECTRIC_PORTS:+$USED_ELECTRIC_PORTS }$ELECTRIC_PORT"
+  if [ -z "$COMPARE_PORT_ENV_SET" ]; then
+    COMPARE_PORT=$(find_fresh_port "${E2E_COMPARE_PORT_RANGE_START:-43200}" "${E2E_COMPARE_PORT_RANGE_END:-43299}" "$USED_COMPARE_PORTS")
+    USED_COMPARE_PORTS="${USED_COMPARE_PORTS:+$USED_COMPARE_PORTS }$COMPARE_PORT"
   fi
 
   export PULSE_PORT
-  export ELECTRIC_PORT
+  export COMPARE_PORT
   export USED_PULSE_PORTS
-  export USED_ELECTRIC_PORTS
+  export USED_COMPARE_PORTS
 }
 
 configure_scenario_runtime_config() {
@@ -185,6 +185,9 @@ configure_scenario_runtime_config() {
   SCENARIO_FEATURE_FLAGS=
 
   case "$scenario" in
+    subquery_move_in_live_replay|subquery_move_out_live_replay)
+      SCENARIO_FEATURE_FLAGS='allow_subqueries,tagged_subqueries'
+      ;;
     subquery_move_in_must_refetch)
       SCENARIO_FEATURE_FLAGS='allow_subqueries'
       ;;
@@ -192,8 +195,7 @@ configure_scenario_runtime_config() {
       CURL_MAX_TIME=3
       ;;
     live_sse_keepalive)
-      CURL_MAX_TIME=2
-      SCENARIO_SSE_TIMEOUT_MS=200
+      CURL_MAX_TIME=25
       ;;
     overload_existing_live_request)
       CURL_MAX_TIME=5
@@ -231,16 +233,16 @@ ensure_common_requirements() {
 
 ensure_electric_requirements() {
   require_cmd mix
-  if [ ! -d "$ELECTRIC_SYNC_DIR/deps" ]; then
+  if [ ! -d "$COMPARE_SYNC_DIR/deps" ]; then
     log "fetching Electric mix dependencies"
-    (cd "$ELECTRIC_SYNC_DIR" && mix deps.get)
+    (cd "$COMPARE_SYNC_DIR" && mix deps.get)
   fi
 }
 
 start_postgres_dev() {
   require_cmd docker
   log "starting dev postgres via docker compose"
-  docker compose -f "$ELECTRIC_DOCKER_COMPOSE" up -d postgres >/dev/null
+  docker compose -f "$COMPARE_DOCKER_COMPOSE" up -d postgres >/dev/null
   wait_for_postgres
 }
 
@@ -305,8 +307,8 @@ cleanup_replication_artifacts() {
   psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<SQL >/dev/null
 DO \$\$
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_${ELECTRIC_STREAM_ID}') THEN
-    EXECUTE 'DROP PUBLICATION ' || quote_ident('electric_publication_${ELECTRIC_STREAM_ID}');
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_${COMPARE_STREAM_ID}') THEN
+    EXECUTE 'DROP PUBLICATION ' || quote_ident('electric_publication_${COMPARE_STREAM_ID}');
   END IF;
   IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'pulsesync_${PULSE_STREAM_ID}_pub') THEN
     EXECUTE 'DROP PUBLICATION ' || quote_ident('pulsesync_${PULSE_STREAM_ID}_pub');
@@ -318,7 +320,7 @@ SELECT pg_drop_replication_slot(slot_name)
 FROM pg_replication_slots
 WHERE NOT active
   AND (
-    slot_name = 'electric_slot_${ELECTRIC_STREAM_ID}'
+    slot_name = 'electric_slot_${COMPARE_STREAM_ID}'
     OR slot_name = 'pulsesync_${PULSE_STREAM_ID}_slot'
     OR slot_name LIKE 'pulsesync_${PULSE_STREAM_ID}_slot_%'
   );
@@ -417,22 +419,22 @@ start_pulsesync() {
   local extra_env=()
   mkdir -p "$dir"
 
-  extra_env+=(ELECTRIC_MAX_CONCURRENT_REQUESTS="$SCENARIO_MAX_CONCURRENT_REQUESTS")
-  extra_env+=(ELECTRIC_LONG_POLL_TIMEOUT_MS="$SCENARIO_LONG_POLL_TIMEOUT_MS")
-  extra_env+=(ELECTRIC_SSE_TIMEOUT_MS="$SCENARIO_SSE_TIMEOUT_MS")
-  extra_env+=(ELECTRIC_FEATURE_FLAGS="$SCENARIO_FEATURE_FLAGS")
+  extra_env+=(SYNC_MAX_CONCURRENT_REQUESTS="$SCENARIO_MAX_CONCURRENT_REQUESTS")
+  extra_env+=(SYNC_LONG_POLL_TIMEOUT_MS="$SCENARIO_LONG_POLL_TIMEOUT_MS")
+  extra_env+=(SYNC_SSE_TIMEOUT_MS="$SCENARIO_SSE_TIMEOUT_MS")
+  extra_env+=(SYNC_FEATURE_FLAGS="$SCENARIO_FEATURE_FLAGS")
 
   log "starting PulseSync on port $PULSE_PORT"
   (
     cd "$ROOT_DIR"
-    env \
+      env \
       DATABASE_URL="$DATABASE_URL" \
-      ELECTRIC_POOLED_DATABASE_URL="$POOLED_DATABASE_URL" \
-      ELECTRIC_SECRET="$SECRET" \
-      ELECTRIC_PORT="$PULSE_PORT" \
-      ELECTRIC_REPLICATION_STREAM_ID="$PULSE_STREAM_ID" \
-      ELECTRIC_STORAGE_MODE="$PULSE_STORAGE_MODE" \
-      ELECTRIC_STORAGE_DIR="$PULSE_STORAGE_DIR" \
+      SYNC_POOLED_DATABASE_URL="$POOLED_DATABASE_URL" \
+      SYNC_SECRET="$SECRET" \
+      SYNC_PORT="$PULSE_PORT" \
+      SYNC_REPLICATION_STREAM_ID="$PULSE_STREAM_ID" \
+      SYNC_STORAGE_MODE="$PULSE_STORAGE_MODE" \
+      SYNC_STORAGE_DIR="$PULSE_STORAGE_DIR" \
       "${extra_env[@]}" \
       go run ./cmd/pulsesync
   ) >"$dir/service.log" 2>&1 &
@@ -452,24 +454,24 @@ start_electric() {
   extra_env+=(ELECTRIC_SSE_TIMEOUT_MS="$SCENARIO_SSE_TIMEOUT_MS")
   extra_env+=(ELECTRIC_FEATURE_FLAGS="$SCENARIO_FEATURE_FLAGS")
 
-  log "starting Electric on port $ELECTRIC_PORT"
+  log "starting Electric on port $COMPARE_PORT"
   (
-    cd "$ELECTRIC_SYNC_DIR"
+    cd "$COMPARE_SYNC_DIR"
     env \
       DATABASE_URL="$DATABASE_URL" \
       ELECTRIC_POOLED_DATABASE_URL="$POOLED_DATABASE_URL" \
       ELECTRIC_SECRET="$SECRET" \
       ELECTRIC_INSECURE=false \
       ELECTRIC_LOG_LEVEL=debug \
-      ELECTRIC_PORT="$ELECTRIC_PORT" \
-      ELECTRIC_REPLICATION_STREAM_ID="$ELECTRIC_STREAM_ID" \
+      ELECTRIC_PORT="$COMPARE_PORT" \
+      ELECTRIC_REPLICATION_STREAM_ID="$COMPARE_STREAM_ID" \
       CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN=true \
       "${extra_env[@]}" \
       mix run --no-halt
   ) >"$dir/service.log" 2>&1 &
 
   SERVICE_PID=$!
-  wait_for_active_health "http://127.0.0.1:${ELECTRIC_PORT}/v1/health"
+  wait_for_active_health "http://127.0.0.1:${COMPARE_PORT}/v1/health"
 }
 
 stop_service() {
@@ -517,6 +519,15 @@ scenario_subset_post_snapshot() {
   local base_url=$1
   local dir=$2
   capture_http "POST" "$base_url/v1/shape?table=items&offset=-1&secret=$SECRET" "$dir/01-subset-post" "$E2E_DIR/subset-post.json"
+}
+
+scenario_subset_subquery_rejected() {
+  local base_url=$1
+  local dir=$2
+  local encoded_where
+  encoded_where='id%20IN%20%28SELECT%20item_id%20FROM%20item_flags%29'
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&subset__where=${encoded_where}&secret=$SECRET" "$dir/01-rejected"
 }
 
 scenario_offset_now_then_insert() {
@@ -626,7 +637,16 @@ scenario_truncate_then_must_refetch() {
   capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-after-truncate"
 }
 
-scenario_subquery_move_in_must_refetch() {
+scenario_subquery_rejected_without_feature_flag() {
+  local base_url=$1
+  local dir=$2
+  local encoded_where
+  encoded_where='id%20IN%20%28SELECT%20item_id%20FROM%20item_flags%29'
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&where=${encoded_where}&secret=$SECRET" "$dir/01-rejected"
+}
+
+scenario_subquery_move_in_live_replay() {
   local base_url=$1
   local dir=$2
   local encoded_where
@@ -643,6 +663,55 @@ scenario_subquery_move_in_must_refetch() {
   sleep 1
 
   capture_http "GET" "$base_url/v1/shape?table=items&where=${encoded_where}&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-after-related-update"
+}
+
+scenario_subquery_move_out_live_replay() {
+  local base_url=$1
+  local dir=$2
+  local encoded_where
+  encoded_where='id%20IN%20%28SELECT%20item_id%20FROM%20item_flags%20WHERE%20enabled%20%3D%20true%29'
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&where=${encoded_where}&secret=$SECRET" "$dir/01-bootstrap"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/update_item_flag_false.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&where=${encoded_where}&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-after-related-update"
+}
+
+scenario_handle_definition_mismatch_must_refetch() {
+  local base_url=$1
+  local dir=$2
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&where=priority%20%3E%3D%202&secret=$SECRET" "$dir/01-bootstrap"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-offset")
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&where=priority%20%3E%3D%203&secret=$SECRET" "$dir/02-mismatched-definition"
+}
+
+scenario_log_full_offset_now_then_update() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&log=full&secret=$SECRET" "$dir/01-offset-now"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/update_item.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&log=full&secret=$SECRET" "$dir/02-continuation"
 }
 
 scenario_log_changes_only_initial_snapshot() {
@@ -665,6 +734,22 @@ scenario_log_changes_only_offset_now_then_update() {
   sleep 1
 
   capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&log=changes_only&secret=$SECRET" "$dir/02-continuation"
+}
+
+scenario_replica_full_offset_now_then_update() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&replica=full&secret=$SECRET" "$dir/01-offset-now"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/update_item.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&replica=full&secret=$SECRET" "$dir/02-continuation"
 }
 
 scenario_overload_existing_live_request() {
@@ -713,4 +798,20 @@ scenario_partition_offset_now_then_insert() {
   sleep 1
 
   capture_http "GET" "$base_url/v1/shape?table=partitioned_items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-continuation"
+}
+
+scenario_partition_child_offset_now_then_insert() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=partitioned_items_100&offset=now&secret=$SECRET" "$dir/01-offset-now"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/insert_partition_item_100.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=partitioned_items_100&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/02-continuation"
 }

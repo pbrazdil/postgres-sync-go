@@ -294,8 +294,10 @@ func normalizeDynamic(value any) any {
 				normalized[key] = "<lsn>"
 			case "txids":
 				normalized[key] = []any{"<txid>"}
-			case "tags":
-				continue
+			case "tags", "removed_tags":
+				normalized[key] = normalizeTags(inner)
+			case "patterns":
+				normalized[key] = normalizePatterns(inner)
 			case "xmin", "xmax":
 				normalized[key] = "<xid>"
 			case "xip_list":
@@ -318,6 +320,43 @@ func normalizeDynamic(value any) any {
 	default:
 		return value
 	}
+}
+
+func normalizeTags(value any) any {
+	items, ok := value.([]any)
+	if !ok || len(items) == 0 {
+		return []any{}
+	}
+	normalized := make([]any, len(items))
+	for index := range items {
+		normalized[index] = "<tag>"
+	}
+	return normalized
+}
+
+func normalizePatterns(value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return []any{}
+	}
+	normalized := make([]any, 0, len(items))
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			normalized = append(normalized, normalizeDynamic(item))
+			continue
+		}
+		clone := make(map[string]any, len(object))
+		for key, inner := range object {
+			if key == "value" {
+				clone[key] = "<tag>"
+			} else {
+				clone[key] = normalizeDynamic(inner)
+			}
+		}
+		normalized = append(normalized, clone)
+	}
+	return normalized
 }
 
 func normalizeXIPList(value any) any {

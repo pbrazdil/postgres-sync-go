@@ -9,12 +9,12 @@ source "$SCRIPT_DIR/lib.sh"
 START_POSTGRES=${START_POSTGRES:-1}
 PARALLEL_DIR="$ARTIFACTS_DIR/parallel"
 PULSE_PID=""
-ELECTRIC_PID=""
+COMPARE_PID=""
 
 cleanup() {
   capture_pg_debug "$PARALLEL_DIR/final-state" || true
   stop_service "$PULSE_PID"
-  stop_service "$ELECTRIC_PID"
+  stop_service "$COMPARE_PID"
 }
 trap cleanup EXIT INT TERM
 
@@ -35,7 +35,7 @@ main() {
   PULSE_PID=$SERVICE_PID
 
   start_electric "$PARALLEL_DIR/electric"
-  ELECTRIC_PID=$SERVICE_PID
+  COMPARE_PID=$SERVICE_PID
 
   capture_pg_debug "$PARALLEL_DIR/db-after-start"
 
@@ -49,8 +49,8 @@ PulseSync:
   log:      $PARALLEL_DIR/pulsesync/service.log
 
 Electric:
-  base url: http://127.0.0.1:${ELECTRIC_PORT}
-  health:   http://127.0.0.1:${ELECTRIC_PORT}/v1/health
+  base url: http://127.0.0.1:${COMPARE_PORT}
+  health:   http://127.0.0.1:${COMPARE_PORT}/v1/health
   log:      $PARALLEL_DIR/electric/service.log
 
 Manual curl helper:

@@ -15,18 +15,26 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
     columns_snapshot
     subset_get_snapshot
     subset_post_snapshot
+    subset_subquery_rejected
     offset_now_then_insert
     offset_now_then_update
     offset_now_then_delete
     live_longpoll_insert
     live_sse_insert
+    live_sse_keepalive
     truncate_then_must_refetch
-    subquery_move_in_must_refetch
+    subquery_rejected_without_feature_flag
+    subquery_move_in_live_replay
+    subquery_move_out_live_replay
+    handle_definition_mismatch_must_refetch
+    log_full_offset_now_then_update
     log_changes_only_initial_snapshot
     log_changes_only_offset_now_then_update
+    replica_full_offset_now_then_update
     overload_existing_live_request
     partition_root_snapshot
     partition_offset_now_then_insert
+    partition_child_offset_now_then_insert
   )
 fi
 
@@ -101,7 +109,7 @@ run_impl() {
     electric)
       start_electric "$out_dir"
       CURRENT_SERVICE_PID=$SERVICE_PID
-      base_url="http://127.0.0.1:${ELECTRIC_PORT}"
+      base_url="http://127.0.0.1:${COMPARE_PORT}"
       ;;
     *)
       echo "unknown implementation: $impl" >&2
