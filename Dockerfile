@@ -11,7 +11,7 @@ COPY pkg ./pkg
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/postgres-sync ./cmd/postgres-sync
 
-FROM alpine:3.22
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates tzdata wget
 
