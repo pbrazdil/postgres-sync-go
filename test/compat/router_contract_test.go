@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/petrbrazdil/pulsesync/pkg/pulsesync"
+	"github.com/pbrazdil/postgres-sync-go/pkg/pgsync"
 )
 
 func TestRouterRootAndHealthLifecycle(t *testing.T) {
@@ -177,15 +177,15 @@ func TestShapeDeleteRequiresSecretAndOptIn(t *testing.T) {
 	}
 }
 
-func newTestEngine(t *testing.T) *pulsesync.Engine {
+func newTestEngine(t *testing.T) *pgsync.Engine {
 	t.Helper()
 
-	cfg := pulsesync.DefaultConfig()
-	cfg.DatabaseURL = "postgresql://postgres:postgres@localhost:5432/pulsesync"
+	cfg := pgsync.DefaultConfig()
+	cfg.DatabaseURL = "postgresql://postgres:postgres@localhost:5432/postgres_sync_go"
 	cfg.PooledDatabaseURL = cfg.DatabaseURL
 	cfg.Secret = "test-secret"
 
-	engine, err := pulsesync.New(cfg)
+	engine, err := pgsync.New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

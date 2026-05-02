@@ -7,7 +7,7 @@ func TestLoaderAppliesDefaultsAndOverrides(t *testing.T) {
 
 	loader := Loader{
 		LookupEnv: lookupFromMap(map[string]string{
-			"DATABASE_URL":                 "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"DATABASE_URL":                 "postgresql://postgres:postgres@localhost:5432/postgres_sync_go",
 			"SYNC_SECRET":                  "test-secret",
 			"SYNC_MAX_CONCURRENT_REQUESTS": `{"initial":500,"existing":30000}`,
 		}),
@@ -36,7 +36,7 @@ func TestLoaderRequiresSecretUnlessInsecure(t *testing.T) {
 
 	loader := Loader{
 		LookupEnv: lookupFromMap(map[string]string{
-			"DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/postgres_sync_go",
 		}),
 	}
 
@@ -46,7 +46,7 @@ func TestLoaderRequiresSecretUnlessInsecure(t *testing.T) {
 
 	insecureLoader := Loader{
 		LookupEnv: lookupFromMap(map[string]string{
-			"DATABASE_URL":  "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"DATABASE_URL":  "postgresql://postgres:postgres@localhost:5432/postgres_sync_go",
 			"SYNC_INSECURE": "true",
 		}),
 	}
@@ -61,7 +61,7 @@ func TestLoaderParsesKnownFeatureFlags(t *testing.T) {
 
 	loader := Loader{
 		LookupEnv: lookupFromMap(map[string]string{
-			"DATABASE_URL":       "postgresql://postgres:postgres@localhost:5432/pulsesync",
+			"DATABASE_URL":       "postgresql://postgres:postgres@localhost:5432/postgres_sync_go",
 			"SYNC_SECRET":        "test-secret",
 			"SYNC_FEATURE_FLAGS": "allow_subqueries,unknown, tagged_subqueries, allow_subqueries",
 		}),

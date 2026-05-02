@@ -23,7 +23,7 @@ type DiskStore struct {
 
 func NewDiskStore(dir string) (*DiskStore, error) {
 	if strings.TrimSpace(dir) == "" {
-		dir = ".pulsesync"
+		dir = ".postgres-sync-go"
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err

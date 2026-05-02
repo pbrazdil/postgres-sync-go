@@ -3,9 +3,9 @@ package httpapi
 import (
 	"net/http"
 
-	"github.com/petrbrazdil/pulsesync/internal/pg"
-	"github.com/petrbrazdil/pulsesync/internal/protocol"
-	"github.com/petrbrazdil/pulsesync/internal/telemetry"
+	"github.com/pbrazdil/postgres-sync-go/internal/pg"
+	"github.com/pbrazdil/postgres-sync-go/internal/protocol"
+	"github.com/pbrazdil/postgres-sync-go/internal/telemetry"
 )
 
 type statusProvider interface {

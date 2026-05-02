@@ -39,7 +39,7 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 		LastConfirmedLSN: "0/16B6C50",
 		SystemID:         "system-1",
 		Timeline:         1,
-		DBName:           "pulsesync",
+		DBName:           "postgres_sync_go",
 	}
 
 	if err := store.SaveShape(context.Background(), shape); err != nil {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
 )
 
 func ParseRelation(input string) (shapes.Relation, error) {

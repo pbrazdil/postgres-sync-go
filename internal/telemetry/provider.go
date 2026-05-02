@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/petrbrazdil/pulsesync/internal/config"
+	"github.com/pbrazdil/postgres-sync-go/internal/config"
 )
 
 type Provider struct {
@@ -33,7 +33,7 @@ func (p *Provider) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(
 		w,
-		"# HELP pulsesync_info Static PulseSync build information.\n# TYPE pulsesync_info gauge\npulsesync_info{version=%q} 1\n",
+		"# HELP postgres_sync_go_info Static postgres-sync-go build information.\n# TYPE postgres_sync_go_info gauge\npostgres_sync_go_info{version=%q} 1\n",
 		p.version,
 	)
 }

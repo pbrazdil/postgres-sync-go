@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/petrbrazdil/pulsesync/internal/storage"
+	"github.com/pbrazdil/postgres-sync-go/internal/storage"
 )
 
 func TestManagerHydratesPersistedDiskState(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pglogrepl"
 
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
 )
 
 type ChangeOperation string

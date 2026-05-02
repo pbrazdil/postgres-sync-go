@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
 )
 
 func TestDefinitionSupportsTargetedRefreshForSimpleWhere(t *testing.T) {

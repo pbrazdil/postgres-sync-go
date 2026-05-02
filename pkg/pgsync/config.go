@@ -1,9 +1,9 @@
-package pulsesync
+package pgsync
 
 import (
 	"os"
 
-	internalconfig "github.com/petrbrazdil/pulsesync/internal/config"
+	internalconfig "github.com/pbrazdil/postgres-sync-go/internal/config"
 )
 
 type Config = internalconfig.Config

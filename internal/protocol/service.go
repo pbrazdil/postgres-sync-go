@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/petrbrazdil/pulsesync/internal/config"
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
-	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
+	"github.com/pbrazdil/postgres-sync-go/internal/config"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/sqlinspect"
 )
 
 type Service struct {

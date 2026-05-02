@@ -10,16 +10,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/petrbrazdil/pulsesync/pkg/pulsesync"
+	"github.com/pbrazdil/postgres-sync-go/pkg/pgsync"
 )
 
 func main() {
-	cfg, err := pulsesync.LoadConfigFromEnv()
+	cfg, err := pgsync.LoadConfigFromEnv()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 
-	engine, err := pulsesync.New(cfg)
+	engine, err := pgsync.New(cfg)
 	if err != nil {
 		log.Fatalf("create engine: %v", err)
 	}

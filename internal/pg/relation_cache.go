@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/petrbrazdil/pulsesync/internal/shapes"
-	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
+	"github.com/pbrazdil/postgres-sync-go/internal/shapes"
+	"github.com/pbrazdil/postgres-sync-go/internal/sqlinspect"
 )
 
 var (
