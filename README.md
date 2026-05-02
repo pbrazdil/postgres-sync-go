@@ -1,5 +1,7 @@
 # postgres-sync-go
 
+**Fast agent platform built on sync  — built for humans and AI agents.**
+
 Electric-compatible Shape sync for Postgres, written in Go.
 
 `postgres-sync-go` is an independent Go implementation of the ElectricSQL sync service. It exposes an Electric-compatible HTTP surface, can run as an embedded library inside another Go process, and can also run as a standalone binary.
@@ -439,7 +441,7 @@ Useful entrypoints:
 | `./test/e2e/manual_curls.sh` | Ready-made curl commands for health, snapshots, subset requests, continuations, long-poll, SSE, and partitioned tables. |
 | `./test/e2e/compare.sh` | Runs the current scenario set one implementation at a time, normalizes unstable headers and IDs, and diffs the results. |
 | `./test/e2e/compare-docker.sh` | Runs the same compare flow using Docker containers instead of host `go run` and `mix run`. |
-| `./test/e2e/validate-postgres-sync-docker.sh` | Runs lifecycle checks for disk restart continuity, deterministic must-refetch on corrupt persisted state, and health degradation/recovery across replication disconnects. |
+| `./test/e2e/validate-postgres-sync-go-docker.sh` | Runs lifecycle checks for disk restart continuity, deterministic must-refetch on corrupt persisted state, and health degradation/recovery across replication disconnects. |
 | `./test/e2e/shadow-client-docker.sh` | Runs an unchanged compatible TypeScript client against dockerized `postgres-sync-go` and asserts client-observed Shape state plus dependent subquery stream events. |
 
 The current differential matrix covers:
@@ -517,12 +519,12 @@ Run vet:
 go vet ./...
 ```
 
-The current development version is `0.1.0-dev`.
+The current preview version is `v0.1.0-preview.1`.
 
 ## License and attribution
 
 `postgres-sync-go` is licensed under the Apache License 2.0. See `LICENSE` and `NOTICE`.
 
-An engineering license and attribution audit is recorded in `attribution-audit.md`.
+An engineering license and attribution audit is recorded in `docs/legal/attribution-audit.md`.
 
 `postgres-sync-go` is an independent project. ElectricSQL and Electric are trademarks or names of their respective owners; this project describes compatibility with the open-source Electric Shape HTTP surface and is not an official Electric project.

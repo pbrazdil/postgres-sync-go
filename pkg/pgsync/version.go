@@ -1,3 +1,3 @@
 package pgsync
 
-const Version = "0.1.0-dev"
+const Version = "v0.1.0-preview.1"

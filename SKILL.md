@@ -76,7 +76,13 @@ Health states:
 
 ## Run With Docker
 
-Build and run the local Compose stack:
+Build the local image:
+
+```bash
+docker build -t postgres-sync-go:local .
+```
+
+Run the local Compose stack:
 
 ```bash
 docker compose up --build
@@ -88,6 +94,11 @@ Default local Compose ports:
 - Postgres: `45432`
 
 The bundled local Compose database is named `postgres_sync_go`.
+
+Compose-only host port overrides:
+
+- `POSTGRES_SYNC_GO_HTTP_PORT`: host HTTP port, default `43100`.
+- `POSTGRES_SYNC_GO_POSTGRES_PORT`: host Postgres port, default `45432`.
 
 Example request:
 
