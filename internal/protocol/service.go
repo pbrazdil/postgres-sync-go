@@ -9,6 +9,7 @@ import (
 
 	"github.com/petrbrazdil/pulsesync/internal/config"
 	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
 )
 
 type Service struct {
@@ -17,6 +18,8 @@ type Service struct {
 	backend   shapes.Backend
 	admission *admissionController
 }
+
+const defaultSSEKeepaliveIntervalMS = 21_000
 
 func NewService(cfg config.Config, manager *shapes.Manager, backend shapes.Backend) *Service {
 	return &Service{
@@ -69,6 +72,10 @@ func (s *Service) HandleShape(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if featureValidation := s.validateFeatureFlags(request); !featureValidation.Empty() {
+		WriteInvalidRequest(w, featureValidation)
+		return
+	}
 	if request.Subset != nil {
 		s.serveSubsetSnapshot(w, r, request, definition, queryDefinition)
 		return
@@ -103,6 +110,22 @@ func (s *Service) authorized(r *http.Request) bool {
 	}
 
 	return secret == s.cfg.Secret
+}
+
+func (s *Service) validateFeatureFlags(req ShapeRequest) ValidationErrors {
+	errors := ValidationErrors{}
+	if s.cfg.FeatureFlags.Enabled(config.FeatureAllowSubqueries) {
+		return errors
+	}
+
+	if requestContainsDependencyKeyword(req) {
+		errors.Add("where", "Subqueries are not supported")
+	}
+	return errors
+}
+
+func requestContainsDependencyKeyword(req ShapeRequest) bool {
+	return sqlinspect.ContainsDependencyKeyword(req.Where)
 }
 
 func (s *Service) serveInitialSnapshot(w http.ResponseWriter, r *http.Request, req ShapeRequest, def shapes.Definition) {
@@ -411,10 +434,7 @@ func (s *Service) serveLiveSSE(w http.ResponseWriter, r *http.Request, req Shape
 	}
 	flusher.Flush()
 
-	keepaliveEvery := time.Duration(s.cfg.SSETimeoutMS) * time.Millisecond
-	if keepaliveEvery <= 0 {
-		keepaliveEvery = time.Second
-	}
+	keepaliveEvery := s.sseKeepaliveInterval()
 
 	writer := bufio.NewWriter(w)
 	for {
@@ -450,6 +470,14 @@ func (s *Service) serveLiveSSE(w http.ResponseWriter, r *http.Request, req Shape
 			currentOffset = nextState.CurrentOffset
 		}
 	}
+}
+
+func (s *Service) sseKeepaliveInterval() time.Duration {
+	intervalMS := defaultSSEKeepaliveIntervalMS
+	if s.cfg.SSETimeoutMS > 0 && s.cfg.SSETimeoutMS < intervalMS {
+		intervalMS = s.cfg.SSETimeoutMS
+	}
+	return time.Duration(intervalMS) * time.Millisecond
 }
 
 func (s *Service) writeSSEEvents(w http.ResponseWriter, body []any) {

@@ -126,6 +126,77 @@ func TestManagerRefreshFullReplicaDiffsRows(t *testing.T) {
 	}
 }
 
+func TestManagerDependentRefreshProducesMoveEvents(t *testing.T) {
+	t.Parallel()
+
+	manager, err := NewManager(storage.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	definition := Definition{
+		Relation: Relation{Schema: "public", Table: "child"},
+		Where:    "parent_id IN (SELECT id FROM parent WHERE value = 1)",
+	}
+
+	initial := SnapshotResult{
+		Schema: map[string]ColumnSchema{
+			"id":        {Type: "int4", PKIndex: intPtr(0)},
+			"parent_id": {Type: "int4"},
+			"value":     {Type: "text"},
+		},
+		Rows: []Row{
+			{"id": "1", "parent_id": "1", "value": "before"},
+		},
+	}
+
+	state, err := manager.UpsertSnapshot(definition, initial)
+	if err != nil {
+		t.Fatalf("UpsertSnapshot() error = %v", err)
+	}
+	if tags, ok := state.Snapshot[0].Headers["tags"].([]string); !ok || len(tags) != 1 {
+		t.Fatalf("snapshot tags = %+v", state.Snapshot[0].Headers["tags"])
+	}
+
+	updated := SnapshotResult{
+		Schema: initial.Schema,
+		Rows: []Row{
+			{"id": "2", "parent_id": "2", "value": "after"},
+		},
+	}
+
+	state, messages, err := manager.RefreshWithMetadata(state.Handle, updated, ChangeMetadata{
+		KeyRelation:      Relation{Schema: "public", Table: "parent"},
+		CommitLSN:        42,
+		TransactionID:    7,
+		DependentRefresh: true,
+	})
+	if err != nil {
+		t.Fatalf("RefreshWithMetadata() error = %v", err)
+	}
+
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3: %+v", len(messages), messages)
+	}
+	if messages[0].Headers["event"] != "move-out" {
+		t.Fatalf("first message = %+v", messages[0])
+	}
+	if messages[1].Headers["operation"] != "insert" || messages[1].Headers["is_move_in"] != true {
+		t.Fatalf("second message = %+v", messages[1])
+	}
+	if tags, ok := messages[1].Headers["tags"].([]string); !ok || len(tags) != 1 {
+		t.Fatalf("move-in tags = %+v", messages[1].Headers["tags"])
+	}
+	if messages[2].Headers["control"] != "snapshot-end" {
+		t.Fatalf("third message = %+v", messages[2])
+	}
+	if _, ok := state.Materialized["1"]; ok {
+		t.Fatalf("old row still materialized: %+v", state.Materialized)
+	}
+	if got := state.Materialized["2"]["value"]; got != "after" {
+		t.Fatalf("new materialized value = %v", got)
+	}
+}
+
 func TestManagerInvalidateByRelation(t *testing.T) {
 	t.Parallel()
 

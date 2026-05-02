@@ -70,6 +70,92 @@ func TestServiceInitialSnapshot(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsSubqueriesWithoutFeatureFlag(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{
+		snapshotFunc: func(context.Context, shapes.SnapshotRequest) (shapes.SnapshotResult, error) {
+			t.Fatal("snapshot backend should not be called")
+			return shapes.SnapshotResult{}, nil
+		},
+	})
+
+	where := url.QueryEscape("id IN (SELECT item_id FROM item_flags)")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&where="+where+"&secret=test-secret", nil)
+	service.HandleShape(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	errorsObject, ok := body["errors"].(map[string]any)
+	if !ok {
+		t.Fatalf("errors = %#v", body["errors"])
+	}
+	whereErrors, ok := errorsObject["where"].([]any)
+	if !ok || len(whereErrors) != 1 || whereErrors[0] != "Subqueries are not supported" {
+		t.Fatalf("where errors = %#v", errorsObject["where"])
+	}
+}
+
+func TestServiceAllowsSubqueriesWithFeatureFlag(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{
+		snapshot: shapes.SnapshotResult{
+			Schema: map[string]shapes.ColumnSchema{
+				"id": {Type: "uuid", PKIndex: intPtr(0)},
+			},
+		},
+	})
+	service.cfg.FeatureFlags = config.FeatureFlags{config.FeatureAllowSubqueries}
+
+	where := url.QueryEscape("id IN (SELECT item_id FROM item_flags)")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&where="+where+"&secret=test-secret", nil)
+	service.HandleShape(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServiceRejectsSubsetSubqueriesWithFeatureFlag(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{
+		snapshotFunc: func(context.Context, shapes.SnapshotRequest) (shapes.SnapshotResult, error) {
+			t.Fatal("snapshot backend should not be called")
+			return shapes.SnapshotResult{}, nil
+		},
+	})
+	service.cfg.FeatureFlags = config.FeatureFlags{config.FeatureAllowSubqueries}
+
+	where := url.QueryEscape("id IN (SELECT item_id FROM item_flags)")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/shape?table=items&offset=-1&subset__where="+where+"&secret=test-secret", nil)
+	service.HandleShape(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+
+	var body struct {
+		Errors map[string]map[string][]string `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got := body.Errors["subset"]["where"]; len(got) != 1 || got[0] != "Subqueries are not allowed in subsets" {
+		t.Fatalf("subset where errors = %+v", got)
+	}
+}
+
 func TestServiceInitialSnapshotChangesOnlyReturnsSnapshotEndOnly(t *testing.T) {
 	t.Parallel()
 
@@ -866,6 +952,15 @@ func TestServiceLiveSSEEmitsKeepaliveComments(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `: keep-alive`) {
 		t.Fatalf("expected keepalive comment in body: %q", body)
+	}
+}
+
+func TestServiceLiveSSEKeepaliveIntervalDefaultsToElectricCadence(t *testing.T) {
+	t.Parallel()
+
+	service, _ := newTestService(stubBackend{})
+	if got := service.sseKeepaliveInterval(); got != 21*time.Second {
+		t.Fatalf("sseKeepaliveInterval() = %s, want 21s", got)
 	}
 }
 

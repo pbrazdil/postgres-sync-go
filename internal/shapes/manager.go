@@ -2,6 +2,7 @@ package shapes
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,9 +10,11 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
 	"github.com/petrbrazdil/pulsesync/internal/storage"
 )
 
@@ -55,9 +58,10 @@ type State struct {
 }
 
 type ChangeMetadata struct {
-	KeyRelation   Relation
-	CommitLSN     uint64
-	TransactionID uint32
+	KeyRelation      Relation
+	CommitLSN        uint64
+	TransactionID    uint32
+	DependentRefresh bool
 }
 
 type canonicalKV struct {
@@ -167,6 +171,7 @@ func (m *Manager) UpsertSnapshotAtOffset(def Definition, snapshot SnapshotResult
 		updated.Definition = def
 		updated.Schema = cloneSchema(snapshot.Schema)
 		updated.Snapshot = buildSnapshotMessages(def, snapshot)
+		decorateDependentSnapshotMessages(updated.Handle, updated.Definition, updated.Snapshot)
 		updated.Changes = nil
 		updated.Materialized = materializedRows(snapshot.Schema, snapshot.Rows)
 		updated.CurrentOffset = currentOffset
@@ -197,6 +202,7 @@ func (m *Manager) UpsertSnapshotAtOffset(def Definition, snapshot SnapshotResult
 		LastAccess:    now,
 		Generation:    m.generation,
 	}
+	decorateDependentSnapshotMessages(state.Handle, state.Definition, state.Snapshot)
 	if err := m.persistStateLocked(state); err != nil {
 		m.generation--
 		return State{}, err
@@ -492,6 +498,10 @@ func (m *Manager) Append(handle string, messages []Message) (State, error) {
 }
 
 func (m *Manager) Refresh(handle string, snapshot SnapshotResult) (State, []Message, error) {
+	return m.RefreshWithMetadata(handle, snapshot, ChangeMetadata{})
+}
+
+func (m *Manager) RefreshWithMetadata(handle string, snapshot SnapshotResult, metadata ChangeMetadata) (State, []Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -509,8 +519,11 @@ func (m *Manager) Refresh(handle string, snapshot SnapshotResult) (State, []Mess
 	updated.LastAccess = time.Now().UTC()
 
 	messages := diffRows(updated.Definition, snapshot.Schema, state.Materialized, updated.Materialized, updated.Definition.Relation)
+	if metadata.DependentRefresh {
+		messages = decorateDependentRefreshMessages(updated.Handle, updated.Definition, messages, metadata)
+	}
 	if len(messages) > 0 {
-		updated.CurrentOffset = applyChangeOffsets(updated.CurrentOffset, messages, ChangeMetadata{})
+		updated.CurrentOffset = applyChangeOffsets(updated.CurrentOffset, messages, metadata)
 		for index := range messages {
 			updated.Changes = append(updated.Changes, cloneMessage(messages[index]))
 		}
@@ -819,6 +832,28 @@ func buildSnapshotMessages(def Definition, snapshot SnapshotResult) []Message {
 	return messages
 }
 
+func definitionHasDependencyKeyword(def Definition) bool {
+	if sqlinspect.ContainsDependencyKeyword(def.Where) {
+		return true
+	}
+	if def.Subset == nil {
+		return false
+	}
+	return sqlinspect.ContainsDependencyKeyword(def.Subset.Where) ||
+		sqlinspect.ContainsDependencyKeyword(def.Subset.WhereExpr) ||
+		sqlinspect.ContainsDependencyKeyword(def.Subset.OrderBy) ||
+		sqlinspect.ContainsDependencyKeyword(def.Subset.OrderByExpr)
+}
+
+func decorateDependentSnapshotMessages(handle string, def Definition, messages []Message) {
+	if !definitionHasDependencyKeyword(def) {
+		return
+	}
+	for index := range messages {
+		addDependentTag(handle, &messages[index])
+	}
+}
+
 func materializedRows(schema map[string]ColumnSchema, rows []Row) map[string]Row {
 	result := make(map[string]Row, len(rows))
 	for _, row := range rows {
@@ -890,6 +925,85 @@ func diffRows(def Definition, schema map[string]ColumnSchema, previous map[strin
 		}
 	}
 	return messages
+}
+
+func decorateDependentRefreshMessages(handle string, def Definition, messages []Message, metadata ChangeMetadata) []Message {
+	if !definitionHasDependencyKeyword(def) {
+		return messages
+	}
+
+	relatedRelationChanged := metadata.KeyRelation != (Relation{}) && metadata.KeyRelation != def.Relation
+	decorated := make([]Message, 0, len(messages)+1)
+	moveIn := false
+	for index := range messages {
+		message := cloneMessage(messages[index])
+		operation, _ := message.Headers["operation"].(string)
+		if relatedRelationChanged && operation == "delete" {
+			decorated = append(decorated, dependentMoveOutMessage(handle, message.InternalKey))
+			continue
+		}
+
+		addDependentTag(handle, &message)
+		if relatedRelationChanged && operation == "insert" {
+			message.Headers["is_move_in"] = true
+			moveIn = true
+		}
+		decorated = append(decorated, message)
+	}
+
+	if moveIn {
+		decorated = append(decorated, Message{
+			Headers: map[string]any{
+				"control":  "snapshot-end",
+				"xmin":     "0",
+				"xmax":     "0",
+				"xip_list": []string{},
+			},
+		})
+	}
+	return decorated
+}
+
+func addDependentTag(handle string, message *Message) {
+	if message == nil || message.InternalKey == "" {
+		return
+	}
+	if message.Headers == nil {
+		message.Headers = map[string]any{}
+	}
+	message.Headers["tags"] = []string{dependentTag(handle, message.InternalKey)}
+}
+
+func dependentMoveOutMessage(handle string, internalKey string) Message {
+	return Message{
+		Headers: map[string]any{
+			"event": "move-out",
+			"patterns": []map[string]any{
+				{
+					"pos":   0,
+					"value": dependentTag(handle, internalKey),
+				},
+			},
+		},
+		InternalKey: internalKey,
+	}
+}
+
+func dependentTag(handle string, internalKey string) string {
+	sum := md5.Sum([]byte(handle + "v:" + dependentTagValue(internalKey)))
+	return hex.EncodeToString(sum[:])
+}
+
+func dependentTagValue(internalKey string) string {
+	if internalKey == "" {
+		return ""
+	}
+	if !strings.Contains(internalKey, "|") {
+		if _, value, ok := strings.Cut(internalKey, "="); ok {
+			return value
+		}
+	}
+	return internalKey
 }
 
 func updateValues(def Definition, schema map[string]ColumnSchema, oldRow Row, newRow Row) (Row, Row, bool) {
@@ -1114,6 +1228,9 @@ func applyChangeOffsets(currentOffset string, messages []Message, metadata Chang
 		if metadata.CommitLSN > 0 {
 			lsn := strconv.FormatUint(metadata.CommitLSN, 10)
 			messages[index].Offset = FormatLSNOffset(metadata.CommitLSN, index)
+			if metadata.DependentRefresh {
+				continue
+			}
 			messages[index].Headers["lsn"] = lsn
 			messages[index].Headers["op_position"] = index
 			messages[index].Headers["txids"] = []uint32{metadata.TransactionID}
@@ -1125,7 +1242,7 @@ func applyChangeOffsets(currentOffset string, messages []Message, metadata Chang
 	if len(messages) == 0 {
 		return currentOffset
 	}
-	if metadata.CommitLSN > 0 {
+	if metadata.CommitLSN > 0 && !metadata.DependentRefresh {
 		messages[len(messages)-1].Headers["last"] = true
 	}
 	return messages[len(messages)-1].Offset

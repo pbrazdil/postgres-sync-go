@@ -32,12 +32,13 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
-      ELECTRIC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
-      ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-secret}
-      ELECTRIC_PORT: 3000
-      ELECTRIC_REPLICATION_STREAM_ID: ${ELECTRIC_REPLICATION_STREAM_ID:-docker}
-      ELECTRIC_STORAGE_MODE: ${ELECTRIC_STORAGE_MODE:-disk}
-      ELECTRIC_STORAGE_DIR: /var/lib/pulsesync
+      SYNC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      SYNC_SECRET: ${SYNC_SECRET:-dev-secret}
+      SYNC_PORT: 3000
+      SYNC_REPLICATION_STREAM_ID: ${SYNC_REPLICATION_STREAM_ID:-docker}
+      SYNC_STORAGE_MODE: ${SYNC_STORAGE_MODE:-disk}
+      SYNC_STORAGE_DIR: /var/lib/pulsesync
+      SYNC_FEATURE_FLAGS: ${SYNC_FEATURE_FLAGS:-}
     ports:
       - "127.0.0.1:${PULSESYNC_HTTP_PORT:-43100}:3000"
     volumes:

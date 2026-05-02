@@ -334,7 +334,7 @@ func (r *Runtime) handleLogicalMessage(ctx context.Context, walData []byte, batc
 			if !ok {
 				continue
 			}
-			if err := r.invalidateUnsupportedShapesForRelation(metadata); err != nil {
+			if err := r.invalidateDependentShapesForRelation(metadata); err != nil {
 				return 0, err
 			}
 			if _, err := r.shapes.InvalidateByRelation(metadata.Relation); err != nil {
@@ -429,13 +429,12 @@ func (r *Runtime) recordDelete(batch *ChangeBatch, message *pglogrepl.DeleteMess
 }
 
 func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error {
+	refreshedDependentShapes := map[string]struct{}{}
+
 	for _, relationID := range batch.RelationIDs() {
 		metadata, ok := r.relationMetadata(relationID)
 		if !ok {
 			continue
-		}
-		if err := r.invalidateUnsupportedShapesForRelation(metadata); err != nil {
-			return err
 		}
 
 		changes := batch.ChangesForRelation(relationID)
@@ -479,6 +478,10 @@ func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error
 				return err
 			}
 		}
+
+		if err := r.refreshDependentShapesForRelation(ctx, metadata, batch, refreshedDependentShapes); err != nil {
+			return err
+		}
 	}
 
 	if batch.CommitLSN > 0 {
@@ -494,8 +497,52 @@ func (r *Runtime) applyChangeBatch(ctx context.Context, batch ChangeBatch) error
 	return nil
 }
 
-func (r *Runtime) invalidateUnsupportedShapesForRelation(metadata relationMetadata) error {
+func (r *Runtime) refreshDependentShapesForRelation(ctx context.Context, metadata relationMetadata, batch ChangeBatch, refreshed map[string]struct{}) error {
 	for _, state := range r.shapes.ActiveStates() {
+		if definitionSupportsTargetedRefresh(state.Definition) {
+			continue
+		}
+		if !definitionRequiresInvalidationForRelation(state.Definition, metadata.Relation, metadata.RootRelation) {
+			continue
+		}
+		if _, ok := refreshed[state.Handle]; ok {
+			continue
+		}
+
+		snapshot, err := r.Snapshot(ctx, shapes.SnapshotRequest{
+			Definition: state.Definition,
+			Mode:       shapes.SnapshotModeData,
+		})
+		if err != nil {
+			var missing shapes.RelationNotFoundError
+			if errors.As(err, &missing) {
+				if _, deleteErr := r.shapes.Delete(state.Handle); deleteErr != nil && !errors.Is(deleteErr, shapes.ErrShapeNotFound) && !errors.Is(deleteErr, shapes.ErrShapeDeleted) {
+					return deleteErr
+				}
+				refreshed[state.Handle] = struct{}{}
+				continue
+			}
+			return err
+		}
+
+		if _, _, err := r.shapes.RefreshWithMetadata(state.Handle, snapshot, shapes.ChangeMetadata{
+			KeyRelation:      metadata.Relation,
+			CommitLSN:        uint64(batch.CommitLSN),
+			TransactionID:    batch.XID,
+			DependentRefresh: true,
+		}); err != nil && !errors.Is(err, shapes.ErrShapeDeleted) && !errors.Is(err, shapes.ErrShapeNotFound) {
+			return err
+		}
+		refreshed[state.Handle] = struct{}{}
+	}
+	return nil
+}
+
+func (r *Runtime) invalidateDependentShapesForRelation(metadata relationMetadata) error {
+	for _, state := range r.shapes.ActiveStates() {
+		if definitionSupportsTargetedRefresh(state.Definition) {
+			continue
+		}
 		if !definitionRequiresInvalidationForRelation(state.Definition, metadata.Relation, metadata.RootRelation) {
 			continue
 		}

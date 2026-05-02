@@ -12,10 +12,10 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
 )
 
 var (
-	dependencyKeywordPattern  = regexp.MustCompile(`(?i)\b(select|join|exists|with|union|intersect|except)\b`)
 	dependencyRelationPattern = regexp.MustCompile(`(?i)\b(from|join)\s+(?:only\s+)?((?:"[^"]+"|[a-zA-Z_][a-zA-Z0-9_$]*))(?:\s*\.\s*((?:"[^"]+"|[a-zA-Z_][a-zA-Z0-9_$]*)))?`)
 )
 
@@ -238,11 +238,7 @@ func definitionSupportsTargetedRefresh(def shapes.Definition) bool {
 	}
 
 	for _, clause := range definitionDependencyClauses(def) {
-		sanitized := sanitizeDependencyClause(clause)
-		if strings.TrimSpace(sanitized) == "" {
-			continue
-		}
-		if dependencyKeywordPattern.MatchString(sanitized) {
+		if sqlinspect.ContainsDependencyKeyword(clause) {
 			return false
 		}
 	}
@@ -285,11 +281,11 @@ func liveDependenciesForDefinition(def shapes.Definition) liveDependencySet {
 	wildcard := false
 
 	for _, clause := range definitionDependencyClauses(def) {
-		sanitized := sanitizeDependencyClause(clause)
+		sanitized := sqlinspect.SanitizeClause(clause)
 		if strings.TrimSpace(sanitized) == "" {
 			continue
 		}
-		if !dependencyKeywordPattern.MatchString(sanitized) {
+		if !sqlinspect.ContainsDependencyKeyword(sanitized) {
 			continue
 		}
 
@@ -339,69 +335,6 @@ func definitionDependencyClauses(def shapes.Definition) []string {
 		clauses = append(clauses, def.Subset.Where, def.Subset.WhereExpr, def.Subset.OrderByExpr)
 	}
 	return clauses
-}
-
-func sanitizeDependencyClause(value string) string {
-	if value == "" {
-		return ""
-	}
-
-	var builder strings.Builder
-	builder.Grow(len(value))
-
-	inSingleQuoted := false
-	inLineComment := false
-	inBlockComment := false
-
-	for index := 0; index < len(value); index++ {
-		switch {
-		case inLineComment:
-			if value[index] == '\n' {
-				inLineComment = false
-				builder.WriteByte(' ')
-			}
-			continue
-		case inBlockComment:
-			if value[index] == '*' && index+1 < len(value) && value[index+1] == '/' {
-				inBlockComment = false
-				index++
-				builder.WriteByte(' ')
-			}
-			continue
-		case inSingleQuoted:
-			if value[index] == '\'' {
-				if index+1 < len(value) && value[index+1] == '\'' {
-					index++
-					continue
-				}
-				inSingleQuoted = false
-				builder.WriteByte(' ')
-			}
-			continue
-		}
-
-		if value[index] == '\'' {
-			inSingleQuoted = true
-			builder.WriteByte(' ')
-			continue
-		}
-		if value[index] == '-' && index+1 < len(value) && value[index+1] == '-' {
-			inLineComment = true
-			index++
-			builder.WriteByte(' ')
-			continue
-		}
-		if value[index] == '/' && index+1 < len(value) && value[index+1] == '*' {
-			inBlockComment = true
-			index++
-			builder.WriteByte(' ')
-			continue
-		}
-
-		builder.WriteByte(value[index])
-	}
-
-	return builder.String()
 }
 
 func parseDependencyRelation(first string, second string, defaultSchema string) (shapes.Relation, bool) {

@@ -8,14 +8,17 @@ import (
 
 type Config = internalconfig.Config
 type CacheConfig = internalconfig.CacheConfig
+type FeatureFlags = internalconfig.FeatureFlags
 type MaxConcurrentRequests = internalconfig.MaxConcurrentRequests
 type StorageConfig = internalconfig.StorageConfig
 type StorageMode = internalconfig.StorageMode
 type TelemetryConfig = internalconfig.TelemetryConfig
 
 const (
-	StorageModeMemory = internalconfig.StorageModeMemory
-	StorageModeDisk   = internalconfig.StorageModeDisk
+	FeatureAllowSubqueries  = internalconfig.FeatureAllowSubqueries
+	FeatureTaggedSubqueries = internalconfig.FeatureTaggedSubqueries
+	StorageModeMemory       = internalconfig.StorageModeMemory
+	StorageModeDisk         = internalconfig.StorageModeDisk
 )
 
 func DefaultConfig() Config {

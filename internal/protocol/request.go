@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/petrbrazdil/pulsesync/internal/shapes"
+	"github.com/petrbrazdil/pulsesync/internal/sqlinspect"
 )
 
 const maxBodyBytes = 1 << 20
@@ -162,7 +163,21 @@ func ValidateSubsetRequest(req ShapeRequest) ValidationErrors {
 		errors.Add("order_by", "order_by is required when limit or offset is present")
 	}
 
+	if subsetContainsDependencyKeyword(req.Subset) {
+		errors.Add("where", "Subqueries are not allowed in subsets")
+	}
+
 	return errors
+}
+
+func subsetContainsDependencyKeyword(subset *shapes.Subset) bool {
+	if subset == nil {
+		return false
+	}
+	return sqlinspect.ContainsDependencyKeyword(subset.Where) ||
+		sqlinspect.ContainsDependencyKeyword(subset.WhereExpr) ||
+		sqlinspect.ContainsDependencyKeyword(subset.OrderBy) ||
+		sqlinspect.ContainsDependencyKeyword(subset.OrderByExpr)
 }
 
 func parseBody(r *http.Request) (map[string]any, *ParseError) {
