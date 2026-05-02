@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -74,7 +75,7 @@ func runNormalizeHTTP(args []string) error {
 
 	resp := normalizedResponse{
 		Status:  status,
-		Headers: normalizeHeaders(headers),
+		Headers: normalizeHeaders(status, headers),
 		Body:    normalizeBody(headerValue(headers, "content-type"), bodyBytes),
 	}
 
@@ -169,7 +170,7 @@ func headerValue(headers map[string][]string, name string) string {
 	return values[len(values)-1]
 }
 
-func normalizeHeaders(headers map[string][]string) map[string]any {
+func normalizeHeaders(status int, headers map[string][]string) map[string]any {
 	keep := []string{
 		"cache-control",
 		"content-type",
@@ -187,6 +188,9 @@ func normalizeHeaders(headers map[string][]string) map[string]any {
 
 	out := map[string]any{}
 	for _, key := range keep {
+		if status == http.StatusNotModified && key == "content-type" {
+			continue
+		}
 		values := headers[key]
 		if len(values) == 0 {
 			continue

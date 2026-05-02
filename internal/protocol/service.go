@@ -394,7 +394,7 @@ func (s *Service) deleteShape(w http.ResponseWriter, req ShapeRequest, def shape
 			})
 			return
 		}
-		w.Header().Set("Cache-Control", "no-cache")
+		writeDeleteAccepted(w)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -408,8 +408,14 @@ func (s *Service) deleteShape(w http.ResponseWriter, req ShapeRequest, def shape
 		}
 	}
 
-	w.Header().Set("Cache-Control", "no-cache")
+	writeDeleteAccepted(w)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func writeDeleteAccepted(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("electric-has-data", "true")
 }
 
 func (s *Service) writeSSE(w http.ResponseWriter, req ShapeRequest, body []any) {

@@ -45,6 +45,7 @@ fi
 SCENARIO_LONG_POLL_TIMEOUT_MS=${SCENARIO_LONG_POLL_TIMEOUT_MS:-20000}
 SCENARIO_SSE_TIMEOUT_MS=${SCENARIO_SSE_TIMEOUT_MS:-60000}
 SCENARIO_FEATURE_FLAGS=${SCENARIO_FEATURE_FLAGS:-}
+SCENARIO_ALLOW_SHAPE_DELETION=${SCENARIO_ALLOW_SHAPE_DELETION:-false}
 USED_SYNC_GO_PORTS=${USED_SYNC_GO_PORTS:-}
 USED_COMPARE_PORTS=${USED_COMPARE_PORTS:-}
 
@@ -176,6 +177,7 @@ configure_one_off_docker_ports() {
   export SCENARIO_LONG_POLL_TIMEOUT_MS
   export SCENARIO_SSE_TIMEOUT_MS
   export SCENARIO_FEATURE_FLAGS
+  export SCENARIO_ALLOW_SHAPE_DELETION
 }
 
 configure_one_off_service_ports() {
@@ -202,6 +204,7 @@ configure_scenario_runtime_config() {
   SCENARIO_LONG_POLL_TIMEOUT_MS=20000
   SCENARIO_SSE_TIMEOUT_MS=60000
   SCENARIO_FEATURE_FLAGS=
+  SCENARIO_ALLOW_SHAPE_DELETION=false
 
   case "$scenario" in
     subquery_move_in_live_replay|\
@@ -218,13 +221,22 @@ configure_scenario_runtime_config() {
     live_sse_insert)
       CURL_MAX_TIME=3
       ;;
+    experimental_live_sse_insert)
+      CURL_MAX_TIME=3
+      ;;
     live_sse_keepalive)
       CURL_MAX_TIME=25
+      ;;
+    live_sse_resume_after_update)
+      CURL_MAX_TIME=3
       ;;
     overload_existing_live_request)
       CURL_MAX_TIME=5
       SCENARIO_LONG_POLL_TIMEOUT_MS=4000
       SCENARIO_MAX_CONCURRENT_REQUESTS='{"initial":10,"existing":1}'
+      ;;
+    shape_delete_handle_rotation)
+      SCENARIO_ALLOW_SHAPE_DELETION=true
       ;;
   esac
 
@@ -233,6 +245,7 @@ configure_scenario_runtime_config() {
   export SCENARIO_LONG_POLL_TIMEOUT_MS
   export SCENARIO_SSE_TIMEOUT_MS
   export SCENARIO_FEATURE_FLAGS
+  export SCENARIO_ALLOW_SHAPE_DELETION
 }
 
 require_cmd() {
@@ -412,6 +425,7 @@ capture_http() {
   local dir=$3
   local body_file=${4:-}
   local allow_timeout=${5:-0}
+  local extra_header=${6:-}
 
   mkdir -p "$dir"
   printf '%s %s\n' "$method" "$url" >"$dir/request.txt"
@@ -431,6 +445,10 @@ capture_http() {
   if [ -n "$body_file" ]; then
     cp "$body_file" "$dir/request-body.json"
     curl_args+=(--header "content-type: application/json" --data "@$body_file")
+  fi
+  if [ -n "$extra_header" ]; then
+    printf '%s\n' "$extra_header" >"$dir/request-extra-header.txt"
+    curl_args+=(--header "$extra_header")
   fi
 
   local curl_rc=0
@@ -465,6 +483,7 @@ start_postgres_sync_go() {
   extra_env+=(SYNC_LONG_POLL_TIMEOUT_MS="$SCENARIO_LONG_POLL_TIMEOUT_MS")
   extra_env+=(SYNC_SSE_TIMEOUT_MS="$SCENARIO_SSE_TIMEOUT_MS")
   extra_env+=(SYNC_FEATURE_FLAGS="$SCENARIO_FEATURE_FLAGS")
+  extra_env+=(SYNC_ALLOW_SHAPE_DELETION="$SCENARIO_ALLOW_SHAPE_DELETION")
 
   log "starting postgres-sync-go on port $SYNC_GO_PORT"
   (
@@ -495,6 +514,7 @@ start_electric() {
   extra_env+=(ELECTRIC_LONG_POLL_TIMEOUT_MS="$SCENARIO_LONG_POLL_TIMEOUT_MS")
   extra_env+=(ELECTRIC_SSE_TIMEOUT_MS="$SCENARIO_SSE_TIMEOUT_MS")
   extra_env+=(ELECTRIC_FEATURE_FLAGS="$SCENARIO_FEATURE_FLAGS")
+  extra_env+=(ELECTRIC_ENABLE_INTEGRATION_TESTING="$SCENARIO_ALLOW_SHAPE_DELETION")
 
   log "starting Electric on port $COMPARE_PORT"
   (
@@ -549,6 +569,22 @@ scenario_columns_snapshot() {
   local base_url=$1
   local dir=$2
   capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&columns=id,value&secret=$SECRET" "$dir/01-columns-snapshot"
+}
+
+scenario_columns_offset_now_then_update() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&columns=id,value&secret=$SECRET" "$dir/01-offset-now"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/update_item.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&columns=id,value&secret=$SECRET" "$dir/02-continuation"
 }
 
 scenario_subset_get_snapshot() {
@@ -620,6 +656,22 @@ scenario_live_sse_insert() {
   capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=0_0&live=true&live_sse=true&secret=$SECRET" "$dir/02-live-sse" "" 1
 }
 
+scenario_experimental_live_sse_insert() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&secret=$SECRET" "$dir/01-bootstrap"
+
+  local handle
+  handle=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-handle")
+
+  (
+    sleep 1
+    run_sql_file "$E2E_DIR/sql/insert_item.sql"
+  ) &
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=0_0&live=true&experimental_live_sse=true&secret=$SECRET" "$dir/02-experimental-live-sse" "" 1
+}
+
 scenario_live_sse_keepalive() {
   local base_url=$1
   local dir=$2
@@ -629,6 +681,22 @@ scenario_live_sse_keepalive() {
   handle=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-handle")
 
   capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=0_0&live=true&live_sse=true&secret=$SECRET" "$dir/02-live-sse-keepalive" "" 1
+}
+
+scenario_live_sse_resume_after_update() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/01-offset-now"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/update_item.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&live=true&live_sse=true&secret=$SECRET" "$dir/02-live-sse-resume" "" 1
 }
 
 scenario_offset_now_then_update() {
@@ -785,6 +853,39 @@ scenario_handle_definition_mismatch_must_refetch() {
   capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&where=priority%20%3E%3D%203&secret=$SECRET" "$dir/02-mismatched-definition"
 }
 
+scenario_unknown_handle_must_refetch() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=missing-handle&offset=0_0&secret=$SECRET" "$dir/01-unknown-handle"
+}
+
+scenario_shape_delete_handle_rotation() {
+  local base_url=$1
+  local dir=$2
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&secret=$SECRET" "$dir/01-bootstrap"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-bootstrap/headers.txt" "electric-offset")
+
+  capture_http "DELETE" "$base_url/v1/shape?handle=${handle}&secret=$SECRET" "$dir/02-delete"
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&secret=$SECRET" "$dir/03-stale-handle"
+}
+
+scenario_cache_if_none_match_304() {
+  local base_url=$1
+  local dir=$2
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&secret=$SECRET" "$dir/01-bootstrap"
+
+  local etag
+  etag=$(extract_header "$dir/01-bootstrap/headers.txt" "etag")
+
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=-1&secret=$SECRET" "$dir/02-if-none-match" "" 0 "If-None-Match: ${etag}"
+}
+
 scenario_log_full_offset_now_then_update() {
   local base_url=$1
   local dir=$2
@@ -821,6 +922,22 @@ scenario_log_changes_only_offset_now_then_update() {
   sleep 1
 
   capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&log=changes_only&secret=$SECRET" "$dir/02-continuation"
+}
+
+scenario_replica_default_offset_now_then_update() {
+  local base_url=$1
+  local dir=$2
+  capture_http "GET" "$base_url/v1/shape?table=items&offset=now&replica=default&secret=$SECRET" "$dir/01-offset-now"
+
+  local handle
+  local offset
+  handle=$(extract_header "$dir/01-offset-now/headers.txt" "electric-handle")
+  offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
+
+  run_sql_file "$E2E_DIR/sql/update_item.sql"
+  sleep 1
+
+  capture_http "GET" "$base_url/v1/shape?table=items&handle=${handle}&offset=${offset}&replica=default&secret=$SECRET" "$dir/02-continuation"
 }
 
 scenario_replica_full_offset_now_then_update() {

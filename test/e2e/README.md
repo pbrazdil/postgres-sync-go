@@ -140,6 +140,7 @@ test/e2e/_artifacts/<timestamp>/
 - `initial_snapshot`
 - `filtered_snapshot`
 - `columns_snapshot`
+- `columns_offset_now_then_update`
 - `subset_get_snapshot`
 - `subset_post_snapshot`
 - `subset_subquery_rejected`
@@ -148,7 +149,9 @@ test/e2e/_artifacts/<timestamp>/
 - `offset_now_then_delete`
 - `live_longpoll_insert`
 - `live_sse_insert`
+- `experimental_live_sse_insert`
 - `live_sse_keepalive`
+- `live_sse_resume_after_update`
 - `truncate_then_must_refetch`
 - `subquery_rejected_without_feature_flag`
 - `subquery_move_in_live_replay`
@@ -158,9 +161,13 @@ test/e2e/_artifacts/<timestamp>/
 - `subquery_negated_move_in_live_replay`
 - `subquery_negated_move_out_live_replay`
 - `handle_definition_mismatch_must_refetch`
+- `unknown_handle_must_refetch`
+- `shape_delete_handle_rotation`
+- `cache_if_none_match_304`
 - `log_full_offset_now_then_update`
 - `log_changes_only_initial_snapshot`
 - `log_changes_only_offset_now_then_update`
+- `replica_default_offset_now_then_update`
 - `replica_full_offset_now_then_update`
 - `overload_existing_live_request`
 - `partition_root_snapshot`
@@ -190,6 +197,7 @@ test/e2e/_artifacts/<timestamp>/
 - The Docker compare runner keeps Postgres and both sync services in containers but still uses host `curl`, `psql`, and the Go normalizer helper.
 - The Docker scripts also generate a unique Compose project name by default so they do not trample another long-running stack from the same repo checkout.
 - Response normalization intentionally removes unstable values such as dynamic handles, cursors, and etags. The goal is to compare semantics, not instance-local IDs.
+- Response normalization ignores `content-type` on `304 Not Modified` because Go's `net/http` suppresses it for empty 304 responses while the comparison service emits it.
 - The normalizer preserves the presence and count of dependent-shape tags, but replaces instance-local tag values before diffing.
 - Raw request/response files and service logs are still stored so mismatches can be debugged from the underlying data.
 
@@ -197,7 +205,5 @@ test/e2e/_artifacts/<timestamp>/
 
 The harness is intentionally small today, but it is structured to grow into a fuller parity suite. The next useful additions are:
 
-- shape deletion scenarios
-- a broader matrix for replica modes and column projections
 - broader disk corruption and recovery matrices
 - longer-running shadow-client runs with reconnect and restart cycles

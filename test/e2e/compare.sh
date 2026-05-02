@@ -13,6 +13,7 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
     initial_snapshot
     filtered_snapshot
     columns_snapshot
+    columns_offset_now_then_update
     subset_get_snapshot
     subset_post_snapshot
     subset_subquery_rejected
@@ -21,7 +22,9 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
     offset_now_then_delete
     live_longpoll_insert
     live_sse_insert
+    experimental_live_sse_insert
     live_sse_keepalive
+    live_sse_resume_after_update
     truncate_then_must_refetch
     subquery_rejected_without_feature_flag
     subquery_move_in_live_replay
@@ -31,9 +34,13 @@ if [ ${#SCENARIOS[@]} -eq 0 ]; then
     subquery_negated_move_in_live_replay
     subquery_negated_move_out_live_replay
     handle_definition_mismatch_must_refetch
+    unknown_handle_must_refetch
+    shape_delete_handle_rotation
+    cache_if_none_match_304
     log_full_offset_now_then_update
     log_changes_only_initial_snapshot
     log_changes_only_offset_now_then_update
+    replica_default_offset_now_then_update
     replica_full_offset_now_then_update
     overload_existing_live_request
     partition_root_snapshot

@@ -102,7 +102,7 @@ var cursorEpoch = time.Date(2024, time.October, 9, 0, 0, 0, 0, time.UTC)
 func WriteSuccessHeaders(w http.ResponseWriter, cfg config.Config, req ShapeRequest, state shapes.State, opts SuccessHeaderOptions) {
 	offset := state.CurrentOffset
 	hasData := fmt.Sprintf("%t", opts.HasData)
-	if req.LiveSSE {
+	if req.LiveSSE && opts.NoChanges {
 		offset = shapes.NowOffset
 		hasData = "true"
 	}
@@ -205,6 +205,8 @@ func cacheControlValue(cfg config.Config, req ShapeRequest) string {
 
 func WriteNotModified(w http.ResponseWriter, cfg config.Config, req ShapeRequest, state shapes.State, opts SuccessHeaderOptions) {
 	WriteSuccessHeaders(w, cfg, req, state, opts)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Del("electric-schema")
 	w.WriteHeader(http.StatusNotModified)
 }
 
