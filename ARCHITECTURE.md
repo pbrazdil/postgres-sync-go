@@ -1,15 +1,15 @@
-# PulseSync Architecture
+# postgres-sync-go Architecture
 
-PulseSync is a Go implementation of the Electric sync-service surface. It accepts Electric-compatible shape requests, snapshots rows from Postgres, follows logical replication, and serves deterministic shape continuations over HTTP, long-poll, or SSE.
+postgres-sync-go is a Go implementation of the Electric sync-service surface. It accepts Electric-compatible shape requests, snapshots rows from Postgres, follows logical replication, and serves deterministic shape continuations over HTTP, long-poll, or SSE.
 
 This file is a codemap. It should help answer "where does this behavior live?" without duplicating every implementation detail.
 
 ## Bird's Eye View
 
-PulseSync has one core engine and two ways to run it:
+postgres-sync-go has one core engine and two ways to run it:
 
-- embedded inside another Go process through `pkg/pulsesync`;
-- as the standalone `pulsesync` binary in `cmd/pulsesync`.
+- embedded inside another Go process through `pkg/pgsync`;
+- as the standalone `postgres-sync` binary in `cmd/postgres-sync`.
 
 The engine is built around four durable concepts:
 
@@ -22,8 +22,8 @@ The engine is built around four durable concepts:
 
 Start here when looking for code:
 
-- `cmd/pulsesync`: process entrypoint. This should stay boring: load config, create an engine, start HTTP, handle shutdown.
-- `pkg/pulsesync`: public API and internal wiring. `Engine`, `Config`, and exported status/types live here.
+- `cmd/postgres-sync`: process entrypoint. This should stay boring: load config, create an engine, start HTTP, handle shutdown.
+- `pkg/pgsync`: public API and internal wiring. `Engine`, `Config`, and exported status/types live here.
 - `internal/config`: defaults, `SYNC_*` env parsing, validation, storage mode, and feature flags.
 - `internal/httpapi`: route selection, CORS, health status, metrics route, and common HTTP headers that are not shape-specific.
 - `internal/protocol`: `/v1/shape` behavior: auth, request parsing, validation, cache headers, overload admission, long-poll, SSE, and error mapping.
@@ -42,8 +42,8 @@ If you are changing a user-visible shape response, expect to touch `internal/pro
 Startup:
 
 ```text
-cmd/pulsesync or embedding app
-  -> pkg/pulsesync.New
+cmd/postgres-sync or embedding app
+  -> pkg/pgsync.New
   -> storage selection and shape hydration
   -> pg.Runtime.Start
   -> query pool, publication, slot, replication stream
@@ -85,15 +85,15 @@ shape state + materialized rows + checkpoint
 
 ## Architectural Invariants
 
-- Only PulseSync packages participate in the runtime package graph.
-- Public embedding API lives in `pkg/pulsesync`; internals should not leak through it casually.
-- `cmd/pulsesync` stays thin. Process policy belongs there; engine behavior does not.
+- Only postgres-sync-go packages participate in the runtime package graph.
+- Public embedding API lives in `pkg/pgsync`; internals should not leak through it casually.
+- `cmd/postgres-sync` stays thin. Process policy belongs there; engine behavior does not.
 - `internal/pg` must not import HTTP/router/protocol delivery packages.
 - `internal/storage` must not depend on runtime, protocol, or shape manager implementation details.
 - Shape handles and offsets are owned by `internal/shapes`; protocol code should consume them, not invent them.
-- Live correctness beats availability. If PulseSync cannot prove a live projection is correct, invalidate or force refetch.
+- Live correctness beats availability. If postgres-sync-go cannot prove a live projection is correct, invalidate or force refetch.
 - Memory mode is disposable. Disk mode is the only mode expected to preserve continuity across restarts.
-- Normalization in `test/e2e/cmd/pulsediff` may hide unstable IDs, but must preserve protocol semantics.
+- Normalization in `test/e2e/cmd/syncdiff` may hide unstable IDs, but must preserve protocol semantics.
 
 ## Boundaries
 
@@ -129,11 +129,11 @@ Testing:
 - Unit tests cover local contracts.
 - `test/compat` freezes high-signal HTTP behavior.
 - `test/e2e/compare-docker.sh` is the current protocol parity harness.
-- `test/e2e/validate-pulsesync-docker.sh` covers PulseSync lifecycle behavior that differential comparison does not.
+- `test/e2e/validate-postgres-sync-go-docker.sh` covers postgres-sync-go lifecycle behavior that differential comparison does not.
 
 ## Where To Change Things
 
-- Add or validate an env var: `internal/config`, `pkg/pulsesync/config.go`, config tests, README.
+- Add or validate an env var: `internal/config`, `pkg/pgsync/config.go`, config tests, README.
 - Add a `/v1/shape` query parameter: `internal/protocol/request.go`, validation tests, E2E curls/comparison.
 - Change response headers or cache behavior: `internal/protocol/response.go`, protocol tests, compat tests, E2E.
 - Change snapshot SQL: `internal/pg/runtime.go`, targeted unit tests, E2E snapshot scenario.

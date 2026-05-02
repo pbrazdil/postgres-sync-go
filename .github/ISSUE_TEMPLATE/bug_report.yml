@@ -1,0 +1,67 @@
+name: Bug report
+description: Report incorrect behavior, crashes, protocol mismatches, or regressions.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail for someone else to reproduce it.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+      placeholder: postgres-sync-go returned ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include schema, config, requests, SQL mutations, or a minimal repo if possible.
+      placeholder: |
+        1. Start postgres-sync-go with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Versions and runtime details.
+      value: |
+        - postgres-sync-go version/commit:
+        - Go version:
+        - Postgres version:
+        - OS/container:
+        - Storage mode: memory/disk
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Redact secrets and credentials. Include only settings needed to reproduce.
+      render: shell
+      placeholder: |
+        DATABASE_URL=postgres://...
+        SYNC_STORAGE_MODE=memory
+        SYNC_FEATURE_FLAGS=
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or artifacts
+      description: Paste short logs, curl output, or artifact paths. Redact secrets.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I have removed or redacted secrets, credentials, and private data.
+          required: true
+        - label: I checked existing issues for a duplicate.
+          required: true

@@ -1,133 +1,127 @@
-# PulseSync
+# postgres-sync-go
 
-PulseSync is a Go rewrite of the ElectricSQL sync service.
+Electric-compatible Shape sync for Postgres, written in Go.
 
-It exposes an Electric-compatible HTTP surface, can run as an embedded library inside another Go process, and can also run as a standalone binary.
+`postgres-sync-go` is an independent Go implementation of the ElectricSQL sync service. It exposes an Electric-compatible HTTP surface, can run as an embedded library inside another Go process, and can also run as a standalone binary.
 
-## Status
+It targets the read path: syncing Shapes of Postgres data out to existing Electric-compatible clients. Writes continue to go through your application API, jobs, or database layer.
 
-PulseSync is usable for local development, protocol evaluation, and side-by-side shadow runs.
+> Status: preview / shadow-ready. `postgres-sync-go` is usable for local development, protocol evaluation, and side-by-side shadow runs. It is not yet recommended as a primary production replacement without workload-specific parity and recovery validation.
 
-It is not cutover-ready yet.
+## Naming
 
-What is implemented today:
+The repository and module are named `postgres-sync-go` for searchability and clarity. The command is named `postgres-sync`; the public Go package is named `pgsync` because Go package identifiers cannot contain hyphens and `pgsync.New(...)` keeps embedded usage readable.
+
+Recommended names:
+
+| Surface | Name |
+| --- | --- |
+| GitHub repository | `github.com/pbrazdil/postgres-sync-go` |
+| Go module | `github.com/pbrazdil/postgres-sync-go` |
+| Public package | `github.com/pbrazdil/postgres-sync-go/pkg/pgsync` |
+| Binary | `postgres-sync` |
+| Docker image | `postgres-sync-go:local` |
+| Metrics prefix | `postgres_sync_go` |
+
+## Why postgres-sync-go?
+
+- **Embeddable Go runtime**: use it inside an existing Go service instead of operating a separate sync process.
+- **Standalone mode**: run it as a normal HTTP sync service when embedding is not desired.
+- **Electric-compatible Shape API**: serves `/v1/shape` and `/v1/health` for compatible clients.
+- **Logical replication runtime**: consumes Postgres changes and fans them out to registered Shapes.
+- **Memory-first default**: starts lightweight for development and ephemeral deployments.
+- **Durable disk mode**: persists shape metadata, rows, logs, and checkpoints for restart continuity.
+- **Correctness-first live updates**: invalidates and forces refetch when it cannot prove a live result is safe.
+- **Production-motivated performance**: in the production apps that motivated this implementation, the Go rewrite has been about 2x faster on average. Treat that as workload-specific and benchmark against your own traffic.
+
+## Compatibility target
+
+`postgres-sync-go` targets the open-source Electric sync-service HTTP surface, not Electric Cloud and not a new Go-native materialization API.
+
+The main compatibility target is existing HTTP clients that consume Shape logs through `/v1/shape`, including initial snapshots, continuations, long-polling, and SSE live delivery.
+
+## Current status
+
+Implemented today:
 
 - Electric-style `/v1/shape` and `/v1/health` endpoints
 - in-memory and disk-backed shape storage
 - embedded Go API and standalone binary
 - eager runtime startup with readiness states
 - logical replication startup and reconnect supervision
-- PK-targeted live refresh for root-table and partition fanout paths
+- primary-key-targeted live refresh for root-table and partition fanout paths
 - long-poll and SSE live delivery
-- `SYNC_FEATURE_FLAGS` parsing, including rejection of subquery shapes unless `allow_subqueries` is enabled
-- dependent-shape live replay for refreshable subquery shapes, including move-in and move-out events
+- `SYNC_FEATURE_FLAGS` parsing
+- rejection of subquery Shapes unless `allow_subqueries` is enabled
+- dependent-Shape live replay for refreshable subquery Shapes, including move-in and move-out events
 - Dockerized differential comparison for the current supported scenario set
-- Dockerized PulseSync lifecycle validation for disk restart continuity, corrupt-shape recovery, and reconnect health transitions
-- conservative invalidation and `must-refetch` behavior when correctness cannot be proven
+- Dockerized lifecycle validation for disk restart continuity, corrupt-Shape recovery, and reconnect health transitions
+- Dockerized shadow-client validation with an unchanged compatible TypeScript client
+- conservative invalidation and must-refetch behavior when correctness cannot be proven
 
-What is still missing for parity signoff:
+Still missing before parity signoff:
 
-- broader dependent-shape tracking for complex nested, negated, or multi-hop subquery plans
-- longer-running shadow validation for SSE behavior, client reconnects, storage growth, WAL retention, and production recovery drills
-- production validation against unchanged compatible clients in shadow mode
+- broader dependent-Shape tracking for complex nested, negated, or multi-hop subquery plans
+- longer-running shadow validation for client reconnects, storage growth, WAL retention, and production recovery drills
+- production-traffic shadow validation beyond the current seeded client matrix
 
-## Goals
+## Design goals
 
 - keep the public Go API small and embeddable
 - keep the HTTP surface compatible with existing clients
 - prefer correctness over stale or guessed live results
 - keep the default runtime lightweight and memory-backed
-- support a durable `disk` mode without changing the public API
+- support a durable disk mode without changing the public API
+- make validation local, repeatable, and friendly to agent-assisted development
 
-## Repository Layout
+## Repository layout
 
-- `cmd/pulsesync`: standalone binary entrypoint
-- `pkg/pulsesync`: public Go API
-- `internal/config`: config defaults, validation, env loading
-- `internal/httpapi`: HTTP router and health surface
-- `internal/pg`: Postgres query and logical replication runtime
-- `internal/protocol`: Electric-compatible request parsing and response delivery
-- `internal/shapes`: shape identity, in-memory state, diffing, subscriptions
-- `internal/storage`: memory and disk-backed persistence
-- `ARCHITECTURE.md`: short physical codemap and architectural invariants
-- `docs`: architecture, harness workflow, quality map, and technical debt tracker
-- `scripts`: local validation and repository harness utilities
-- `test/e2e`: seed data, manual curls, side-by-side runner, and normalized protocol compare harness
-
-## Agent/Harness Workflow
-
-PulseSync keeps repository knowledge local and executable so future agent runs can validate their own work.
-
-- `AGENTS.md` is the short map for future agents.
-- `ARCHITECTURE.md` describes package boundaries, runtime flow, and invariants.
-- `docs/HARNESS_ENGINEERING.md` describes the feedback loop and artifact rules.
-- `docs/QUALITY.md` maps change types to validation gates.
-- `docs/tech-debt-tracker.md` keeps parity and hardening debt visible.
-
-Default local validation:
-
-```bash
-./scripts/harness-check.sh
+```text
+cmd/postgres-sync        standalone binary entrypoint
+pkg/pgsync               public Go API
+internal/config          config defaults, validation, and env loading
+internal/httpapi         HTTP router and health surface
+internal/pg              Postgres query and logical replication runtime
+internal/protocol        Electric-compatible request parsing and response delivery
+internal/shapes          shape identity, in-memory state, diffing, subscriptions
+internal/storage         memory and disk-backed persistence
+ARCHITECTURE.md          physical codemap and architectural invariants
+docs/                    architecture, harness workflow, quality map, debt tracker
+scripts/                 local validation and repository harness utilities
+test/e2e/                seeded data, curls, side-by-side runner, protocol compare harness
 ```
-
-Heavier gates:
-
-```bash
-./scripts/harness-check.sh --docker-e2e
-./scripts/harness-check.sh --lifecycle
-./scripts/harness-check.sh --all
-```
-
-## E2E Harness
-
-The repo includes a small end-to-end harness for exercising PulseSync against a seeded Postgres database and comparing protocol output.
-
-Useful entrypoints:
-
-- `./test/e2e/start-both.sh`
-  Starts both sync services side by side against the same Postgres instance for manual inspection.
-- `./test/e2e/start-both-docker.sh`
-  Starts dockerized Postgres and both sync services side by side and streams container logs.
-- `./test/e2e/manual_curls.sh`
-  Ready-made curl commands for `/v1/health`, snapshots, subset requests, continuations, long-poll, SSE, and partitioned tables.
-- `./test/e2e/compare.sh`
-  Runs the current scenario set one implementation at a time, normalizes unstable headers and IDs, and diffs the results.
-- `./test/e2e/compare-docker.sh`
-  Runs the same compare flow using Docker containers instead of host `go run` and `mix run`.
-- `./test/e2e/validate-pulsesync-docker.sh`
-  Runs PulseSync-specific lifecycle checks for disk restart continuity, deterministic `must-refetch` on corrupt persisted state, and health degradation/recovery across replication disconnects.
-
-The current differential matrix covers health, snapshots, subset requests, subset subquery rejection, `offset=now` continuations, long-poll, SSE insert delivery and keepalives, truncate invalidation, subquery feature-flag rejection, dependent-shape move-in/move-out live replay, handle-definition mismatch, overload handling, `log=full`, `log=changes_only`, `replica=full`, partitioned-root fanout, and child-partition fanout.
-
-Artifacts are written under `test/e2e/_artifacts/<timestamp>/` and include raw request/response files, normalized outputs, Postgres debug snapshots, and per-service logs.
 
 ## Requirements
 
-- Go `1.26` or newer to build from source
+- Go 1.26 or newer to build from source
 - PostgreSQL with logical replication enabled
 - a database role that can:
   - connect and query tables
-  - create the publication used by PulseSync
+  - create the publication used by `postgres-sync-go`
   - create and use logical replication slots
-- Postgres configured with logical replication capacity, typically including:
-  - `wal_level=logical`
-  - `max_replication_slots > 0`
-  - `max_wal_senders > 0`
+
+Postgres must have logical replication capacity enabled, typically including:
+
+```conf
+wal_level = logical
+max_replication_slots > 0
+max_wal_senders > 0
+```
 
 Notes:
 
-- `DATABASE_URL` should point to a direct Postgres connection, not a transaction-pooled proxy, because PulseSync also uses it for logical replication.
+- `DATABASE_URL` should point to a direct Postgres connection, not a transaction-pooled proxy, because `postgres-sync-go` also uses it for logical replication.
 - `SYNC_POOLED_DATABASE_URL` can point to a pooled query endpoint if you want separate query and replication connections.
 
-## Standalone Usage
+## Standalone usage
 
 Build the binary:
 
 ```bash
-go build ./cmd/pulsesync
+go build ./cmd/postgres-sync
 ```
 
-Run it with a minimal config:
+Run with a minimal config:
 
 ```bash
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
@@ -136,7 +130,7 @@ export SYNC_SECRET='dev-secret'
 export SYNC_PORT=3000
 export SYNC_STORAGE_MODE=memory
 
-go run ./cmd/pulsesync
+go run ./cmd/postgres-sync
 ```
 
 For local testing without a shared secret:
@@ -145,7 +139,7 @@ For local testing without a shared secret:
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/app?sslmode=disable'
 export SYNC_INSECURE=true
 
-go run ./cmd/pulsesync
+go run ./cmd/postgres-sync
 ```
 
 Check health:
@@ -156,24 +150,28 @@ curl http://localhost:3000/v1/health
 
 Health states:
 
-- `starting`: process is booting
-- `waiting`: process is up, but replication is not currently active
-- `active`: query + replication runtime is active
+| State | Meaning |
+| --- | --- |
+| `starting` | process is booting |
+| `waiting` | process is up, but replication is not currently active |
+| `active` | query and replication runtime is active |
 
 `/v1/health` returns:
 
-- `200` when status is `active`
-- `202` when status is `starting` or `waiting`
+| HTTP status | Runtime status |
+| --- | --- |
+| `200` | `active` |
+| `202` | `starting` or `waiting` |
 
 ## Docker
 
 Build the container image:
 
 ```bash
-docker build -t pulsesync:local .
+docker build -t postgres-sync-go:local .
 ```
 
-Run PulseSync with the bundled local Compose stack:
+Run `postgres-sync-go` with the bundled local Compose stack:
 
 ```bash
 docker compose up --build
@@ -182,23 +180,29 @@ docker compose up --build
 That stack starts:
 
 - Postgres with logical replication enabled
-- PulseSync on `http://127.0.0.1:43100`
+- `postgres-sync-go` on `http://127.0.0.1:43100`
 
-The default host ports intentionally avoid common local sync-service/Postgres development ports:
+The local Compose database is named `postgres_sync_go`.
 
-- PulseSync: `43100`
-- Postgres: `45432`
+The default host ports intentionally avoid common local sync-service and Postgres development ports:
+
+| Service | Port |
+| --- | ---: |
+| `postgres-sync-go` | `43100` |
+| Postgres | `45432` |
 
 Useful environment overrides:
 
-- `PULSESYNC_HTTP_PORT`
-- `PULSESYNC_POSTGRES_PORT`
-- `SYNC_SECRET`
-- `SYNC_REPLICATION_STREAM_ID`
-- `SYNC_FEATURE_FLAGS`
-- `SYNC_STORAGE_MODE`
+| Variable | Purpose |
+| --- | --- |
+| `POSTGRES_SYNC_GO_HTTP_PORT` | local Compose HTTP port |
+| `POSTGRES_SYNC_GO_POSTGRES_PORT` | local Compose Postgres port |
+| `SYNC_SECRET` | shared secret for `/v1/shape` |
+| `SYNC_REPLICATION_STREAM_ID` | publication and slot naming seed |
+| `SYNC_FEATURE_FLAGS` | comma-separated feature flags |
+| `SYNC_STORAGE_MODE` | `memory` or `disk` |
 
-The default Compose config uses durable `disk` storage in a Docker volume mounted at `/var/lib/pulsesync`.
+The default Compose config uses durable disk storage in a Docker volume mounted at `/var/lib/postgres-sync-go`.
 
 Example request:
 
@@ -206,7 +210,7 @@ Example request:
 curl 'http://127.0.0.1:43100/v1/shape?table=items&offset=-1&secret=dev-secret'
 ```
 
-## Embedded Usage
+## Embedded usage
 
 ```go
 package main
@@ -216,17 +220,17 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/petrbrazdil/pulsesync/pkg/pulsesync"
+	"github.com/pbrazdil/postgres-sync-go/pkg/pgsync"
 )
 
 func main() {
-	cfg := pulsesync.DefaultConfig()
+	cfg := pgsync.DefaultConfig()
 	cfg.DatabaseURL = "postgres://postgres:postgres@localhost:5432/app?sslmode=disable"
 	cfg.PooledDatabaseURL = cfg.DatabaseURL
 	cfg.Secret = "dev-secret"
-	cfg.Storage.Mode = pulsesync.StorageModeMemory
+	cfg.Storage.Mode = pgsync.StorageModeMemory
 
-	engine, err := pulsesync.New(cfg)
+	engine, err := pgsync.New(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -244,25 +248,32 @@ func main() {
 
 Public API:
 
-- `pulsesync.New(Config) (*Engine, error)`
-- `(*Engine).Start(context.Context) error`
-- `(*Engine).Handler() http.Handler`
-- `(*Engine).Status() pulsesync.Status`
-- `(*Engine).Close(context.Context) error`
+```go
+pgsync.New(Config) (*Engine, error)
+(*Engine).Start(context.Context) error
+(*Engine).Handler() http.Handler
+(*Engine).Status() pgsync.Status
+(*Engine).Close(context.Context) error
+```
 
-## HTTP Surface
+## HTTP surface
 
 Implemented routes:
 
-- `GET /`
-- `GET /v1/health`
-- `GET|HEAD|POST|DELETE /v1/shape`
-- `OPTIONS /v1/shape`
-- `GET /metrics`
+| Route | Description |
+| --- | --- |
+| `GET /` | basic service response |
+| `GET /v1/health` | readiness and replication health |
+| `GET /v1/shape` | Shape snapshot, continuation, long-poll, or SSE stream |
+| `HEAD /v1/shape` | Shape metadata check |
+| `POST /v1/shape` | Shape request with JSON subset body |
+| `DELETE /v1/shape` | Shape deletion when explicitly enabled |
+| `OPTIONS /v1/shape` | CORS preflight; unauthenticated |
+| `GET /metrics` | minimal metrics surface |
 
-`/metrics` currently exposes only a static `pulsesync_info` metric. It is not a full Prometheus instrumentation surface yet.
+`/metrics` currently exposes only a static `postgres_sync_go_info` metric. It is not a full Prometheus instrumentation surface yet.
 
-### `/v1/shape` Request Surface
+## `/v1/shape` request support
 
 Supported request fields today:
 
@@ -278,7 +289,7 @@ Supported request fields today:
 - `replica`
 - `log`
 - `subset__*` query fields
-- POST JSON subset body
+- `POST` JSON subset body
 
 Notes:
 
@@ -286,9 +297,9 @@ Notes:
 - `secret` and legacy `api_secret` query parameters are accepted.
 - `live_sse=true` requires `live=true`.
 - subset requests are snapshot-only; they do not long-poll and they do not stream SSE.
-- shape deletion via `DELETE /v1/shape` is available only when `SYNC_ALLOW_SHAPE_DELETION=true`.
+- Shape deletion via `DELETE /v1/shape` is available only when `SYNC_ALLOW_SHAPE_DELETION=true`.
 
-### Example Requests
+## Example requests
 
 Initial snapshot:
 
@@ -322,7 +333,7 @@ curl -N 'http://localhost:3000/v1/shape?table=items&handle=<handle>&offset=0_0&l
 
 ## Configuration
 
-PulseSync currently loads its standalone config from environment variables.
+Standalone config is currently loaded from environment variables.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -333,62 +344,135 @@ PulseSync currently loads its standalone config from environment variables.
 | `SYNC_PORT` | no | `3000` | HTTP listen port. |
 | `SYNC_REPLICATION_STREAM_ID` | no | `default` | Used in publication and slot naming. |
 | `SYNC_DB_POOL_SIZE` | no | `20` | Max query pool size. |
-| `SYNC_MAX_CONCURRENT_REQUESTS` | no | `{"initial":300,"existing":10000}` | Admission limits for initial vs existing shape requests. |
+| `SYNC_MAX_CONCURRENT_REQUESTS` | no | `{"initial":300,"existing":10000}` | Admission limits for initial vs existing Shape requests. |
 | `SYNC_CACHE_MAX_AGE` | no | `60` | Default cache max-age for non-live responses. |
-| `SYNC_CACHE_STALE_AGE` | no | `300` | Default `stale-while-revalidate` for non-live responses. |
+| `SYNC_CACHE_STALE_AGE` | no | `300` | Default stale-while-revalidate for non-live responses. |
 | `SYNC_STORAGE_MODE` | no | `memory` | `memory` or `disk`. |
-| `SYNC_STORAGE_DIR` | no | `./.pulsesync` in `disk` mode | Storage directory for SQLite metadata and chunk files. |
+| `SYNC_STORAGE_DIR` | no | `./.postgres-sync-go` in disk mode | Storage directory for SQLite metadata and chunk files. |
 | `SYNC_LONG_POLL_TIMEOUT_MS` | no | `20000` | Wait duration for long-poll live requests. |
-| `SYNC_SSE_TIMEOUT_MS` | no | `60000` | Used for SSE cache headers. PulseSync defaults SSE keepalive comments to the compatible 21s cadence. |
+| `SYNC_SSE_TIMEOUT_MS` | no | `60000` | Used for SSE cache headers. SSE keepalive comments use the compatible 21s cadence. |
 | `SYNC_ALLOW_SHAPE_DELETION` | no | `false` | Enables `DELETE /v1/shape`. |
-| `SYNC_FEATURE_FLAGS` | no | none | Comma-separated feature flags. PulseSync recognizes `allow_subqueries` and `tagged_subqueries`; subquery shapes are rejected unless `allow_subqueries` is present. |
+| `SYNC_FEATURE_FLAGS` | no | none | Comma-separated feature flags. Recognizes `allow_subqueries` and `tagged_subqueries`; subquery Shapes are rejected unless `allow_subqueries` is present. |
 
 Current gaps in standalone config loading:
 
 - `ListenHost` is available in the Go config type, but not yet loaded from env.
-- telemetry metrics path is configurable in the Go config type, but not yet loaded from env.
+- the telemetry metrics path is configurable in the Go config type, but not yet loaded from env.
 
-## Storage Modes
+## Storage modes
 
 ### `memory`
 
 - default mode
-- shape state is ephemeral
+- Shape state is ephemeral
 - replication continuity is not preserved across restart
 - replication slot is temporary
 
 ### `disk`
 
-- persists shape metadata, materialized rows, change logs, and runtime checkpoint
+- persists Shape metadata, materialized rows, change logs, and runtime checkpoint
 - uses SQLite for metadata
 - uses append-only JSON chunk files for persisted change logs
 - uses a named persistent replication slot derived from the replication stream ID
 - attempts continuity from the last confirmed LSN on restart
 
-Recovery behavior in `disk` mode:
+Recovery behavior in disk mode:
 
 - if persisted state is valid, handles and offsets are preserved
-- if checkpoint, slot, or database identity is incompatible, PulseSync invalidates persisted shapes and forces client refetch
-- if one persisted shape is corrupt, PulseSync tombstones that shape instead of aborting the entire catalog load
+- if checkpoint, slot, or database identity is incompatible, `postgres-sync-go` invalidates persisted Shapes and forces client refetch
+- if one persisted Shape is corrupt, `postgres-sync-go` tombstones that Shape instead of aborting the entire catalog load
 
-## How It Works
+## How it works
 
 At a high level:
 
-1. PulseSync loads config and creates either a memory store or disk store.
+1. `postgres-sync-go` loads config and creates either a memory store or disk store.
 2. `Start()` eagerly opens the query pool, verifies Postgres connectivity, reconciles publication state, opens logical replication, and begins supervising reconnects.
-3. A shape request is canonicalized into a stable hash from its definition. Identical definitions map to the same shape handle.
-4. Initial requests build a snapshot and materialized row set for that shape.
+3. A Shape request is canonicalized into a stable hash from its definition. Identical definitions map to the same Shape handle.
+4. Initial requests build a snapshot and materialized row set for that Shape.
 5. The replication loop buffers row changes per transaction by relation and primary key.
-6. On commit, PulseSync refreshes only the changed primary keys for candidate shapes instead of resnapshotting whole relations.
-7. Long-poll and SSE consumers wait on shape-local change notifications.
-8. In `disk` mode, confirmed runtime checkpoints and shape state are persisted for restart continuity.
+6. On commit, `postgres-sync-go` refreshes only the changed primary keys for candidate Shapes instead of resnapshotting whole relations.
+7. Long-poll and SSE consumers wait on Shape-local change notifications.
+8. In disk mode, confirmed runtime checkpoints and Shape state are persisted for restart continuity.
 
 Important runtime behavior:
 
-- partition writes fan out to shapes registered on the concrete partition and on the partition root
-- `TRUNCATE` does not try to replay row-level semantics; affected shapes are invalidated
-- when PulseSync cannot prove a live shape update is correct, it prefers invalidation and `must-refetch`
+- partition writes fan out to Shapes registered on the concrete partition and on the partition root
+- `TRUNCATE` does not try to replay row-level semantics; affected Shapes are invalidated
+- when `postgres-sync-go` cannot prove a live Shape update is correct, it prefers invalidation and must-refetch over stale results
+
+## Validation workflow
+
+`postgres-sync-go` keeps repository knowledge local and executable so future agent or maintainer runs can validate their own work.
+
+- `AGENTS.md` is the short map for future agents.
+- `ARCHITECTURE.md` describes package boundaries, runtime flow, and invariants.
+- `docs/HARNESS_ENGINEERING.md` describes the feedback loop and artifact rules.
+- `docs/QUALITY.md` maps change types to validation gates.
+- `docs/tech-debt-tracker.md` keeps parity and hardening debt visible.
+
+Default local validation:
+
+```bash
+./scripts/harness-check.sh
+```
+
+Heavier gates:
+
+```bash
+./scripts/harness-check.sh --docker-e2e
+./scripts/harness-check.sh --lifecycle
+./scripts/harness-check.sh --shadow-client
+./scripts/harness-check.sh --all
+```
+
+## E2E harness
+
+The repo includes a small end-to-end harness for exercising `postgres-sync-go` against a seeded Postgres database and comparing protocol output.
+
+Useful entrypoints:
+
+| Script | Purpose |
+| --- | --- |
+| `./test/e2e/start-both.sh` | Starts both sync services side by side against the same Postgres instance for manual inspection. |
+| `./test/e2e/start-both-docker.sh` | Starts dockerized Postgres and both sync services side by side and streams container logs. |
+| `./test/e2e/manual_curls.sh` | Ready-made curl commands for health, snapshots, subset requests, continuations, long-poll, SSE, and partitioned tables. |
+| `./test/e2e/compare.sh` | Runs the current scenario set one implementation at a time, normalizes unstable headers and IDs, and diffs the results. |
+| `./test/e2e/compare-docker.sh` | Runs the same compare flow using Docker containers instead of host `go run` and `mix run`. |
+| `./test/e2e/validate-postgres-sync-docker.sh` | Runs lifecycle checks for disk restart continuity, deterministic must-refetch on corrupt persisted state, and health degradation/recovery across replication disconnects. |
+| `./test/e2e/shadow-client-docker.sh` | Runs an unchanged compatible TypeScript client against dockerized `postgres-sync-go` and asserts client-observed Shape state plus dependent subquery stream events. |
+
+The current differential matrix covers:
+
+- health
+- snapshots
+- subset requests
+- subset subquery rejection
+- `offset=now` continuations
+- long-poll
+- SSE insert delivery and keepalives
+- truncate invalidation
+- subquery feature-flag rejection
+- dependent-Shape move-in/move-out live replay
+- handle-definition mismatch
+- overload handling
+- `log=full`
+- `log=changes_only`
+- `replica=full`
+- partitioned-root fanout
+- child-partition fanout
+
+The current shadow-client matrix covers:
+
+- initial snapshots
+- filtered snapshots
+- column projections
+- long-poll inserts
+- SSE updates
+- dependent-Shape move-in and move-out stream events
+- partition-root live fanout
+
+Artifacts are written under `test/e2e/_artifacts/<timestamp>/` and include raw request/response files, normalized outputs, Postgres debug snapshots, and per-service logs.
 
 ## Constraints
 
@@ -398,22 +482,24 @@ Important runtime behavior:
 - Metrics are minimal.
 - The main compatibility target is existing HTTP clients, not a new direct Go materialization API.
 
-## Known Issues
+## Known issues
 
-- The repo now has a real protocol differential runner and a PulseSync lifecycle validator, but the covered matrix is still too small for cutover.
+- The repo has a real protocol differential runner, lifecycle validator, and shadow-client validator, but the covered matrix is still too small for cutover.
 - Cross-table dependent live semantics are not fully implemented.
-- `tagged_subqueries` is recognized for config compatibility. PulseSync emits stable dependency tags for refreshable subquery shapes, but complex nested or negated dependency plans still need broader parity coverage.
+- `tagged_subqueries` is recognized for config compatibility. `postgres-sync-go` emits stable dependency tags for refreshable subquery Shapes, but complex nested or negated dependency plans still need broader parity coverage.
 - Shapes that cannot be safely refreshed are handled conservatively and may still force refetch rather than risk stale results.
-- `disk` mode restart continuity and corrupt-state recovery are covered by the Docker validator, but not yet by long-running shadow traffic with a representative workload.
+- Disk-mode restart continuity and corrupt-state recovery are covered by the Docker validator, but not yet by long-running shadow traffic with a representative workload.
 - Standalone config still has a few env-loading gaps, notably listen host and metrics path.
 
-## Future TODO
+## Roadmap
 
-- expand the protocol differential matrix with longer-running SSE, more replica modes, shape deletion/rotation, and complex tagged dependent-shape cases
+Near-term work:
+
+- expand the protocol differential matrix with longer-running SSE, more replica modes, Shape deletion/rotation, and complex tagged dependent-Shape cases
 - add more real integration coverage around unsupported live invalidation paths
 - validate long-running restart continuity and slot behavior under representative shadow traffic
 - add manual publication mode
-- improve unsupported-shape detection with a more robust dependency model
+- improve unsupported-Shape detection with a more robust dependency model
 - expand telemetry and Prometheus metrics
 - polish Docker packaging and add deployment examples
 
@@ -432,3 +518,11 @@ go vet ./...
 ```
 
 The current development version is `0.1.0-dev`.
+
+## License and attribution
+
+`postgres-sync-go` is licensed under the Apache License 2.0. See `LICENSE` and `NOTICE`.
+
+An engineering license and attribution audit is recorded in `attribution-audit.md`.
+
+`postgres-sync-go` is an independent project. ElectricSQL and Electric are trademarks or names of their respective owners; this project describes compatibility with the open-source Electric Shape HTTP surface and is not an official Electric project.

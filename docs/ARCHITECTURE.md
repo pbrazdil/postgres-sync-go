@@ -1,6 +1,6 @@
 # Architecture Doc Location
 
-The canonical PulseSync codemap lives at the repository root:
+The canonical postgres-sync-go codemap lives at the repository root:
 
 ```text
 ARCHITECTURE.md

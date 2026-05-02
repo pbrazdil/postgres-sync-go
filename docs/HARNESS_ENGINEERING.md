@@ -1,6 +1,6 @@
 # Harness Engineering
 
-This repo applies the ideas from OpenAI's "Harness engineering" article to PulseSync: make the workspace legible to agents, keep repository knowledge versioned, and turn validation into executable feedback loops instead of tribal memory.
+This repo applies the ideas from OpenAI's "Harness engineering" article to postgres-sync-go: make the workspace legible to agents, keep repository knowledge versioned, and turn validation into executable feedback loops instead of tribal memory.
 
 Source: https://openai.com/index/harness-engineering/
 
@@ -41,11 +41,19 @@ Full supported protocol comparison:
 ./scripts/harness-check.sh --docker-e2e
 ```
 
-PulseSync lifecycle validation:
+postgres-sync-go lifecycle validation:
 
 ```bash
 ./scripts/harness-check.sh --lifecycle
 ```
+
+Unchanged TypeScript client shadow validation:
+
+```bash
+./scripts/harness-check.sh --shadow-client
+```
+
+Direct entrypoint: `test/e2e/shadow-client-docker.sh`.
 
 Everything available from the harness:
 
