@@ -7,8 +7,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/lib.sh"
 
 COMPOSE_FILE=${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.yml}
-COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-pulsesync-validate-$(date +%Y%m%d%H%M%S)}
-VALIDATION_DIR="$ARTIFACTS_DIR/pulsesync-validate-docker"
+COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-postgres-sync-go-validate-$(date +%Y%m%d%H%M%S)}
+VALIDATION_DIR="$ARTIFACTS_DIR/postgres-sync-go-validate-docker"
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ]; then
   SCENARIOS=(
@@ -71,36 +71,36 @@ find_persisted_chunk() {
   local handle=$1
   local sanitized
   sanitized=$(sanitize_storage_handle "$handle")
-  find "$PULSE_STORAGE_BIND_DIR/chunks/$sanitized" -name '*.json' | sort | head -n 1
+  find "$SYNC_GO_STORAGE_BIND_DIR/chunks/$sanitized" -name '*.json' | sort | head -n 1
 }
 
-set_pulsesync_storage() {
+set_postgres_sync_go_storage() {
   local mode=$1
   local bind_dir=$2
-  PULSE_STORAGE_MODE=$mode
-  PULSE_STORAGE_DIR=/var/lib/pulsesync
-  PULSE_STORAGE_BIND_DIR=$bind_dir
-  export PULSE_STORAGE_MODE
-  export PULSE_STORAGE_DIR
-  export PULSE_STORAGE_BIND_DIR
+  SYNC_GO_STORAGE_MODE=$mode
+  SYNC_GO_STORAGE_DIR=/var/lib/postgres-sync-go
+  SYNC_GO_STORAGE_BIND_DIR=$bind_dir
+  export SYNC_GO_STORAGE_MODE
+  export SYNC_GO_STORAGE_DIR
+  export SYNC_GO_STORAGE_BIND_DIR
 }
 
 reset_stack() {
   compose_cmd down -v >/dev/null 2>&1 || true
-  rm -rf "$PULSE_STORAGE_BIND_DIR"
-  mkdir -p "$PULSE_STORAGE_BIND_DIR"
+  rm -rf "$SYNC_GO_STORAGE_BIND_DIR"
+  mkdir -p "$SYNC_GO_STORAGE_BIND_DIR"
   compose_cmd up -d postgres >/dev/null
   wait_for_postgres
   reset_database
 }
 
-start_pulsesync_compose() {
+start_postgres_sync_go_compose() {
   local dir=$1
   mkdir -p "$dir"
-  log "starting dockerized PulseSync on port $PULSE_PORT (storage=$PULSE_STORAGE_MODE)"
-  compose_cmd up -d --build --no-deps pulsesync >/dev/null
-  if ! wait_for_active_health "http://127.0.0.1:${PULSE_PORT}/v1/health"; then
-    compose_cmd logs --no-color pulsesync >"$dir/service.log" 2>&1 || true
+  log "starting dockerized postgres-sync-go on port $SYNC_GO_PORT (storage=$SYNC_GO_STORAGE_MODE)"
+  compose_cmd up -d --build --no-deps postgres-sync-go >/dev/null
+  if ! wait_for_active_health "http://127.0.0.1:${SYNC_GO_PORT}/v1/health"; then
+    compose_cmd logs --no-color postgres-sync-go >"$dir/service.log" 2>&1 || true
     return 1
   fi
 }
@@ -114,8 +114,8 @@ stop_compose_service() {
   compose_cmd rm -sf "$service" >/dev/null 2>&1 || true
 
   case "$service" in
-    pulsesync)
-      port=$PULSE_PORT
+    postgres-sync-go)
+      port=$SYNC_GO_PORT
       ;;
     electric)
       port=$COMPARE_PORT
@@ -129,14 +129,14 @@ stop_compose_service() {
 
 scenario_disk_restart_continuity() {
   local dir="$VALIDATION_DIR/disk_restart_continuity"
-  local base_url="http://127.0.0.1:${PULSE_PORT}"
+  local base_url="http://127.0.0.1:${SYNC_GO_PORT}"
   mkdir -p "$dir"
 
-  set_pulsesync_storage disk "$dir/storage"
+  set_postgres_sync_go_storage disk "$dir/storage"
   reset_stack
   capture_pg_debug "$dir/db-before"
 
-  start_pulsesync_compose "$dir/01-start"
+  start_postgres_sync_go_compose "$dir/01-start"
   capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/01-offset-now"
   local handle
   local offset
@@ -146,9 +146,9 @@ scenario_disk_restart_continuity() {
   offset=$(extract_header "$dir/01-offset-now/headers.txt" "electric-offset")
   assert_equals "$offset" "0_inf" "initial offset=now should use 0_inf"
 
-  stop_compose_service pulsesync "$dir/01-stop"
+  stop_compose_service postgres-sync-go "$dir/01-stop"
 
-  start_pulsesync_compose "$dir/02-restart"
+  start_postgres_sync_go_compose "$dir/02-restart"
   capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/02-offset-now"
   restarted_handle=$(extract_header "$dir/02-offset-now/headers.txt" "electric-handle")
   restarted_offset=$(extract_header "$dir/02-offset-now/headers.txt" "electric-offset")
@@ -163,19 +163,19 @@ scenario_disk_restart_continuity() {
   assert_contains "$dir/03-continuation/normalized.json" '"control": "up-to-date"' "continuation after restart should flush up-to-date"
 
   capture_pg_debug "$dir/db-after"
-  stop_compose_service pulsesync "$dir/final-stop"
+  stop_compose_service postgres-sync-go "$dir/final-stop"
 }
 
 scenario_disk_corrupt_shape_recovery() {
   local dir="$VALIDATION_DIR/disk_corrupt_shape_recovery"
-  local base_url="http://127.0.0.1:${PULSE_PORT}"
+  local base_url="http://127.0.0.1:${SYNC_GO_PORT}"
   mkdir -p "$dir"
 
-  set_pulsesync_storage disk "$dir/storage"
+  set_postgres_sync_go_storage disk "$dir/storage"
   reset_stack
   capture_pg_debug "$dir/db-before"
 
-  start_pulsesync_compose "$dir/01-start"
+  start_postgres_sync_go_compose "$dir/01-start"
   capture_http "GET" "$base_url/v1/shape?table=items&where=priority%20%3E%3D%201&offset=now&secret=$SECRET" "$dir/01-shape-a"
   capture_http "GET" "$base_url/v1/shape?table=items&where=priority%20%3E%3D%202&offset=now&secret=$SECRET" "$dir/02-shape-b"
 
@@ -190,7 +190,7 @@ scenario_disk_corrupt_shape_recovery() {
 
   run_sql_file "$E2E_DIR/sql/insert_item.sql"
   sleep 1
-  stop_compose_service pulsesync "$dir/01-stop"
+  stop_compose_service postgres-sync-go "$dir/01-stop"
 
   local chunk_a
   local chunk_b
@@ -202,7 +202,7 @@ scenario_disk_corrupt_shape_recovery() {
   fi
   printf '{broken' >"$chunk_a"
 
-  start_pulsesync_compose "$dir/02-restart"
+  start_postgres_sync_go_compose "$dir/02-restart"
   capture_http "GET" "$base_url/v1/shape?table=items&where=priority%20%3E%3D%201&handle=${handle_a}&offset=${offset_a}&secret=$SECRET" "$dir/03-shape-a-after-restart"
   capture_http "GET" "$base_url/v1/shape?table=items&where=priority%20%3E%3D%202&handle=${handle_b}&offset=${offset_b}&secret=$SECRET" "$dir/04-shape-b-after-restart"
 
@@ -219,19 +219,19 @@ scenario_disk_corrupt_shape_recovery() {
   assert_equals "$replacement_handle_b" "$handle_b" "healthy shape should preserve handle"
 
   capture_pg_debug "$dir/db-after"
-  stop_compose_service pulsesync "$dir/final-stop"
+  stop_compose_service postgres-sync-go "$dir/final-stop"
 }
 
 scenario_reconnect_health_and_continuation() {
   local dir="$VALIDATION_DIR/reconnect_health_and_continuation"
-  local base_url="http://127.0.0.1:${PULSE_PORT}"
+  local base_url="http://127.0.0.1:${SYNC_GO_PORT}"
   mkdir -p "$dir"
 
-  set_pulsesync_storage memory "$dir/storage"
+  set_postgres_sync_go_storage memory "$dir/storage"
   reset_stack
   capture_pg_debug "$dir/db-before"
 
-  start_pulsesync_compose "$dir/01-start"
+  start_postgres_sync_go_compose "$dir/01-start"
   capture_http "GET" "$base_url/v1/shape?table=items&offset=now&secret=$SECRET" "$dir/01-offset-now"
   local handle
   local offset
@@ -259,14 +259,14 @@ scenario_reconnect_health_and_continuation() {
   assert_contains "$dir/04-continuation/normalized.json" '"control": "up-to-date"' "continuation after reconnect should flush up-to-date"
 
   capture_pg_debug "$dir/db-after"
-  stop_compose_service pulsesync "$dir/final-stop"
+  stop_compose_service postgres-sync-go "$dir/final-stop"
 }
 
 run_scenario() {
   local scenario=$1
-  log "running PulseSync docker validation: $scenario"
+  log "running postgres-sync-go docker validation: $scenario"
   "scenario_${scenario}"
-  log "PulseSync docker validation passed: $scenario"
+  log "postgres-sync-go docker validation passed: $scenario"
 }
 
 main() {
@@ -274,7 +274,7 @@ main() {
   require_cmd docker
   configure_one_off_docker_ports
 
-  log "using one-off host ports: postgres=$DB_PORT pulsesync=$PULSE_PORT electric=$COMPARE_PORT"
+  log "using one-off host ports: postgres=$DB_PORT postgres-sync-go=$SYNC_GO_PORT electric=$COMPARE_PORT"
   log "using compose project: $COMPOSE_PROJECT_NAME"
 
   local scenario
@@ -283,7 +283,7 @@ main() {
   done
 
   echo
-  echo "all PulseSync docker validations passed" >&2
+  echo "all postgres-sync-go docker validations passed" >&2
   echo "artifacts: $VALIDATION_DIR" >&2
 }
 

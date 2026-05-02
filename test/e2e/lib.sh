@@ -4,46 +4,65 @@ set -euo pipefail
 
 E2E_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "$E2E_DIR/../.." && pwd)
-COMPARE_SYNC_DIR="$ROOT_DIR/electric/packages/sync-service"
-COMPARE_DOCKER_COMPOSE="$COMPARE_SYNC_DIR/dev/docker-compose.yml"
+COMPARE_SYNC_DIR=${COMPARE_SYNC_DIR:-}
+COMPARE_DOCKER_COMPOSE=${COMPARE_DOCKER_COMPOSE:-}
+COMPARE_TELEMETRY_DIR=${COMPARE_TELEMETRY_DIR:-}
+if [ -n "$COMPARE_SYNC_DIR" ] && [ -z "$COMPARE_DOCKER_COMPOSE" ]; then
+  COMPARE_DOCKER_COMPOSE="$COMPARE_SYNC_DIR/dev/docker-compose.yml"
+fi
+if [ -n "$COMPARE_SYNC_DIR" ] && [ -z "$COMPARE_TELEMETRY_DIR" ] && [ -d "$COMPARE_SYNC_DIR/../electric-telemetry" ]; then
+  COMPARE_TELEMETRY_DIR=$(cd "$COMPARE_SYNC_DIR/../electric-telemetry" && pwd)
+fi
 
 ARTIFACTS_DIR_DEFAULT="$E2E_DIR/_artifacts/$(date +%Y%m%d-%H%M%S)"
 ARTIFACTS_DIR=${ARTIFACTS_DIR:-$ARTIFACTS_DIR_DEFAULT}
 
 DB_PORT_ENV_SET=${DB_PORT+x}
-PULSE_PORT_ENV_SET=${PULSE_PORT+x}
+SYNC_GO_PORT_ENV_SET=${SYNC_GO_PORT+x}
 COMPARE_PORT_ENV_SET=${COMPARE_PORT+x}
 DATABASE_URL_ENV_SET=${DATABASE_URL+x}
 POOLED_DATABASE_URL_ENV_SET=${POOLED_DATABASE_URL+x}
 
 DB_PORT=${DB_PORT:-54321}
-PULSE_PORT=${PULSE_PORT:-3100}
+SYNC_GO_PORT=${SYNC_GO_PORT:-3100}
 COMPARE_PORT=${COMPARE_PORT:-3200}
 
-DATABASE_URL=${DATABASE_URL:-postgresql://postgres:password@localhost:${DB_PORT}/electric?sslmode=disable}
+DATABASE_URL=${DATABASE_URL:-postgresql://postgres:password@localhost:${DB_PORT}/postgres_sync_go?sslmode=disable}
 POOLED_DATABASE_URL=${POOLED_DATABASE_URL:-$DATABASE_URL}
 SECRET=${SECRET:-test-secret}
 
-PULSE_STREAM_ID=${PULSE_STREAM_ID:-pulsecmp}
+SYNC_GO_STREAM_ID=${SYNC_GO_STREAM_ID:-syncgocmp}
 COMPARE_STREAM_ID=${COMPARE_STREAM_ID:-electriccmp}
 
-PULSE_STORAGE_MODE=${PULSE_STORAGE_MODE:-memory}
-PULSE_STORAGE_DIR=${PULSE_STORAGE_DIR:-$ARTIFACTS_DIR/pulsesync-storage}
-PULSE_STORAGE_BIND_DIR=${PULSE_STORAGE_BIND_DIR:-$ARTIFACTS_DIR/pulsesync-storage}
+SYNC_GO_STORAGE_MODE=${SYNC_GO_STORAGE_MODE:-memory}
+SYNC_GO_STORAGE_DIR=${SYNC_GO_STORAGE_DIR:-$ARTIFACTS_DIR/postgres-sync-go-storage}
+SYNC_GO_STORAGE_BIND_DIR=${SYNC_GO_STORAGE_BIND_DIR:-$ARTIFACTS_DIR/postgres-sync-go-storage}
 CURL_MAX_TIME=${CURL_MAX_TIME:-20}
-SCENARIO_MAX_CONCURRENT_REQUESTS=${SCENARIO_MAX_CONCURRENT_REQUESTS:-{"initial":300,"existing":10000}}
+SCENARIO_MAX_CONCURRENT_REQUESTS=${SCENARIO_MAX_CONCURRENT_REQUESTS:-}
+if [ -z "$SCENARIO_MAX_CONCURRENT_REQUESTS" ]; then
+  SCENARIO_MAX_CONCURRENT_REQUESTS='{"initial":300,"existing":10000}'
+fi
 SCENARIO_LONG_POLL_TIMEOUT_MS=${SCENARIO_LONG_POLL_TIMEOUT_MS:-20000}
 SCENARIO_SSE_TIMEOUT_MS=${SCENARIO_SSE_TIMEOUT_MS:-60000}
 SCENARIO_FEATURE_FLAGS=${SCENARIO_FEATURE_FLAGS:-}
-USED_PULSE_PORTS=${USED_PULSE_PORTS:-}
+USED_SYNC_GO_PORTS=${USED_SYNC_GO_PORTS:-}
 USED_COMPARE_PORTS=${USED_COMPARE_PORTS:-}
 
-PULSEDIFF_BIN=${PULSEDIFF_BIN:-$ARTIFACTS_DIR/bin/pulsediff}
+SYNCDIFF_BIN=${SYNCDIFF_BIN:-$ARTIFACTS_DIR/bin/syncdiff}
 
 mkdir -p "$ARTIFACTS_DIR"
 
 log() {
   printf '[e2e] %s\n' "$*" >&2
+}
+
+comparison_unavailable() {
+  cat >&2 <<EOF
+[e2e] comparison source unavailable
+[e2e] Set COMPARE_SYNC_DIR to a local comparison sync-service checkout to run differential scenarios.
+[e2e] Current COMPARE_SYNC_DIR: $COMPARE_SYNC_DIR
+EOF
+  exit 77
 }
 
 port_is_free() {
@@ -135,23 +154,23 @@ configure_one_off_docker_ports() {
   fi
   configure_one_off_service_ports
   if [ -z "$DATABASE_URL_ENV_SET" ]; then
-    DATABASE_URL="postgresql://postgres:password@localhost:${DB_PORT}/electric?sslmode=disable"
+    DATABASE_URL="postgresql://postgres:password@localhost:${DB_PORT}/postgres_sync_go?sslmode=disable"
   fi
   if [ -z "$POOLED_DATABASE_URL_ENV_SET" ]; then
     POOLED_DATABASE_URL="$DATABASE_URL"
   fi
 
   export DB_PORT
-  export PULSE_PORT
+  export SYNC_GO_PORT
   export COMPARE_PORT
   export DATABASE_URL
   export POOLED_DATABASE_URL
   export SECRET
-  export PULSE_STREAM_ID
+  export SYNC_GO_STREAM_ID
   export COMPARE_STREAM_ID
-  export PULSE_STORAGE_MODE
-  export PULSE_STORAGE_DIR
-  export PULSE_STORAGE_BIND_DIR
+  export SYNC_GO_STORAGE_MODE
+  export SYNC_GO_STORAGE_DIR
+  export SYNC_GO_STORAGE_BIND_DIR
   export CURL_MAX_TIME
   export SCENARIO_MAX_CONCURRENT_REQUESTS
   export SCENARIO_LONG_POLL_TIMEOUT_MS
@@ -160,18 +179,18 @@ configure_one_off_docker_ports() {
 }
 
 configure_one_off_service_ports() {
-  if [ -z "$PULSE_PORT_ENV_SET" ]; then
-    PULSE_PORT=$(find_fresh_port "${E2E_PULSE_PORT_RANGE_START:-43100}" "${E2E_PULSE_PORT_RANGE_END:-43199}" "$USED_PULSE_PORTS")
-    USED_PULSE_PORTS="${USED_PULSE_PORTS:+$USED_PULSE_PORTS }$PULSE_PORT"
+  if [ -z "$SYNC_GO_PORT_ENV_SET" ]; then
+    SYNC_GO_PORT=$(find_fresh_port "${E2E_SYNC_GO_PORT_RANGE_START:-43100}" "${E2E_SYNC_GO_PORT_RANGE_END:-43199}" "$USED_SYNC_GO_PORTS")
+    USED_SYNC_GO_PORTS="${USED_SYNC_GO_PORTS:+$USED_SYNC_GO_PORTS }$SYNC_GO_PORT"
   fi
   if [ -z "$COMPARE_PORT_ENV_SET" ]; then
     COMPARE_PORT=$(find_fresh_port "${E2E_COMPARE_PORT_RANGE_START:-43200}" "${E2E_COMPARE_PORT_RANGE_END:-43299}" "$USED_COMPARE_PORTS")
     USED_COMPARE_PORTS="${USED_COMPARE_PORTS:+$USED_COMPARE_PORTS }$COMPARE_PORT"
   fi
 
-  export PULSE_PORT
+  export SYNC_GO_PORT
   export COMPARE_PORT
-  export USED_PULSE_PORTS
+  export USED_SYNC_GO_PORTS
   export USED_COMPARE_PORTS
 }
 
@@ -224,14 +243,17 @@ ensure_common_requirements() {
   require_cmd go
   require_cmd pg_isready
   require_cmd psql
-  mkdir -p "$(dirname "$PULSEDIFF_BIN")"
-  if [ ! -x "$PULSEDIFF_BIN" ]; then
-    log "building pulsediff helper"
-    (cd "$ROOT_DIR" && go build -o "$PULSEDIFF_BIN" ./test/e2e/cmd/pulsediff)
+  mkdir -p "$(dirname "$SYNCDIFF_BIN")"
+  if [ ! -x "$SYNCDIFF_BIN" ]; then
+    log "building syncdiff helper"
+    (cd "$ROOT_DIR" && go build -o "$SYNCDIFF_BIN" ./test/e2e/cmd/syncdiff)
   fi
 }
 
 ensure_electric_requirements() {
+  if [ ! -d "$COMPARE_SYNC_DIR" ]; then
+    comparison_unavailable
+  fi
   require_cmd mix
   if [ ! -d "$COMPARE_SYNC_DIR/deps" ]; then
     log "fetching Electric mix dependencies"
@@ -240,6 +262,9 @@ ensure_electric_requirements() {
 }
 
 start_postgres_dev() {
+  if [ ! -f "$COMPARE_DOCKER_COMPOSE" ]; then
+    comparison_unavailable
+  fi
   require_cmd docker
   log "starting dev postgres via docker compose"
   docker compose -f "$COMPARE_DOCKER_COMPOSE" up -d postgres >/dev/null
@@ -310,8 +335,8 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_${COMPARE_STREAM_ID}') THEN
     EXECUTE 'DROP PUBLICATION ' || quote_ident('electric_publication_${COMPARE_STREAM_ID}');
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'pulsesync_${PULSE_STREAM_ID}_pub') THEN
-    EXECUTE 'DROP PUBLICATION ' || quote_ident('pulsesync_${PULSE_STREAM_ID}_pub');
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'postgres_sync_go_${SYNC_GO_STREAM_ID}_pub') THEN
+    EXECUTE 'DROP PUBLICATION ' || quote_ident('postgres_sync_go_${SYNC_GO_STREAM_ID}_pub');
   END IF;
 END
 \$\$;
@@ -321,8 +346,8 @@ FROM pg_replication_slots
 WHERE NOT active
   AND (
     slot_name = 'electric_slot_${COMPARE_STREAM_ID}'
-    OR slot_name = 'pulsesync_${PULSE_STREAM_ID}_slot'
-    OR slot_name LIKE 'pulsesync_${PULSE_STREAM_ID}_slot_%'
+    OR slot_name = 'postgres_sync_go_${SYNC_GO_STREAM_ID}_slot'
+    OR slot_name LIKE 'postgres_sync_go_${SYNC_GO_STREAM_ID}_slot_%'
   );
 SQL
 }
@@ -404,17 +429,17 @@ capture_http() {
     fi
   fi
 
-  "$PULSEDIFF_BIN" normalize-http --headers "$dir/headers.txt" --body "$dir/body.txt" >"$dir/normalized.json"
+  "$SYNCDIFF_BIN" normalize-http --headers "$dir/headers.txt" --body "$dir/body.txt" >"$dir/normalized.json"
   printf '%s\n' "$curl_rc" >"$dir/curl-exit-code.txt"
 }
 
 extract_header() {
   local headers_file=$1
   local header_name=$2
-  "$PULSEDIFF_BIN" extract-header --headers "$headers_file" --name "$header_name"
+  "$SYNCDIFF_BIN" extract-header --headers "$headers_file" --name "$header_name"
 }
 
-start_pulsesync() {
+start_postgres_sync_go() {
   local dir=$1
   local extra_env=()
   mkdir -p "$dir"
@@ -424,23 +449,23 @@ start_pulsesync() {
   extra_env+=(SYNC_SSE_TIMEOUT_MS="$SCENARIO_SSE_TIMEOUT_MS")
   extra_env+=(SYNC_FEATURE_FLAGS="$SCENARIO_FEATURE_FLAGS")
 
-  log "starting PulseSync on port $PULSE_PORT"
+  log "starting postgres-sync-go on port $SYNC_GO_PORT"
   (
     cd "$ROOT_DIR"
       env \
       DATABASE_URL="$DATABASE_URL" \
       SYNC_POOLED_DATABASE_URL="$POOLED_DATABASE_URL" \
       SYNC_SECRET="$SECRET" \
-      SYNC_PORT="$PULSE_PORT" \
-      SYNC_REPLICATION_STREAM_ID="$PULSE_STREAM_ID" \
-      SYNC_STORAGE_MODE="$PULSE_STORAGE_MODE" \
-      SYNC_STORAGE_DIR="$PULSE_STORAGE_DIR" \
+      SYNC_PORT="$SYNC_GO_PORT" \
+      SYNC_REPLICATION_STREAM_ID="$SYNC_GO_STREAM_ID" \
+      SYNC_STORAGE_MODE="$SYNC_GO_STORAGE_MODE" \
+      SYNC_STORAGE_DIR="$SYNC_GO_STORAGE_DIR" \
       "${extra_env[@]}" \
-      go run ./cmd/pulsesync
+      go run ./cmd/postgres-sync
   ) >"$dir/service.log" 2>&1 &
 
   SERVICE_PID=$!
-  wait_for_active_health "http://127.0.0.1:${PULSE_PORT}/v1/health"
+  wait_for_active_health "http://127.0.0.1:${SYNC_GO_PORT}/v1/health"
 }
 
 start_electric() {

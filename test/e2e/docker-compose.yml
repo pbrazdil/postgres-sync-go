@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_DB: electric
+      POSTGRES_DB: postgres_sync_go
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     command:
@@ -24,7 +24,8 @@ services:
       timeout: 5s
       retries: 10
 
-  pulsesync:
+  postgres-sync-go:
+    image: postgres-sync-go:local
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -32,43 +33,43 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
-      SYNC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres_sync_go?sslmode=disable
+      SYNC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres_sync_go?sslmode=disable
       SYNC_SECRET: ${SECRET:-test-secret}
       SYNC_PORT: 3100
-      SYNC_REPLICATION_STREAM_ID: ${PULSE_STREAM_ID:-pulsecmp}
-      SYNC_STORAGE_MODE: ${PULSE_STORAGE_MODE:-memory}
-      SYNC_STORAGE_DIR: ${PULSE_STORAGE_DIR:-/var/lib/pulsesync}
-      SYNC_MAX_CONCURRENT_REQUESTS: ${SCENARIO_MAX_CONCURRENT_REQUESTS}
-      SYNC_LONG_POLL_TIMEOUT_MS: ${SCENARIO_LONG_POLL_TIMEOUT_MS}
-      SYNC_SSE_TIMEOUT_MS: ${SCENARIO_SSE_TIMEOUT_MS}
-      SYNC_FEATURE_FLAGS: ${SCENARIO_FEATURE_FLAGS}
+      SYNC_REPLICATION_STREAM_ID: ${SYNC_GO_STREAM_ID:-syncgocmp}
+      SYNC_STORAGE_MODE: ${SYNC_GO_STORAGE_MODE:-memory}
+      SYNC_STORAGE_DIR: ${SYNC_GO_STORAGE_DIR:-/var/lib/postgres-sync-go}
+      SYNC_MAX_CONCURRENT_REQUESTS: '${SCENARIO_MAX_CONCURRENT_REQUESTS:-{"initial":300,"existing":10000}}'
+      SYNC_LONG_POLL_TIMEOUT_MS: ${SCENARIO_LONG_POLL_TIMEOUT_MS:-20000}
+      SYNC_SSE_TIMEOUT_MS: ${SCENARIO_SSE_TIMEOUT_MS:-60000}
+      SYNC_FEATURE_FLAGS: ${SCENARIO_FEATURE_FLAGS:-}
     ports:
-      - "127.0.0.1:${PULSE_PORT:-43100}:3100"
+      - "127.0.0.1:${SYNC_GO_PORT:-43100}:3100"
     volumes:
-      - ${PULSE_STORAGE_BIND_DIR:-./_runtime/pulsesync-storage}:${PULSE_STORAGE_DIR:-/var/lib/pulsesync}
+      - ${SYNC_GO_STORAGE_BIND_DIR:-./_runtime/postgres-sync-go-storage}:${SYNC_GO_STORAGE_DIR:-/var/lib/postgres-sync-go}
 
   electric:
     build:
-      context: ../../electric/packages/sync-service
+      context: ${COMPARE_SYNC_DIR:-.}
       dockerfile: Dockerfile
       additional_contexts:
-        electric-telemetry: ../../electric/packages/electric-telemetry
+        electric-telemetry: ${COMPARE_TELEMETRY_DIR:-.}
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
-      ELECTRIC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/electric?sslmode=disable
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres_sync_go?sslmode=disable
+      ELECTRIC_POOLED_DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres_sync_go?sslmode=disable
       ELECTRIC_SECRET: ${SECRET:-test-secret}
       ELECTRIC_INSECURE: "false"
       ELECTRIC_LOG_LEVEL: debug
       ELECTRIC_PORT: 3000
       ELECTRIC_REPLICATION_STREAM_ID: ${COMPARE_STREAM_ID:-electriccmp}
-      ELECTRIC_MAX_CONCURRENT_REQUESTS: ${SCENARIO_MAX_CONCURRENT_REQUESTS}
-      ELECTRIC_LONG_POLL_TIMEOUT_MS: ${SCENARIO_LONG_POLL_TIMEOUT_MS}
-      ELECTRIC_SSE_TIMEOUT_MS: ${SCENARIO_SSE_TIMEOUT_MS}
-      ELECTRIC_FEATURE_FLAGS: ${SCENARIO_FEATURE_FLAGS}
+      ELECTRIC_MAX_CONCURRENT_REQUESTS: '${SCENARIO_MAX_CONCURRENT_REQUESTS:-{"initial":300,"existing":10000}}'
+      ELECTRIC_LONG_POLL_TIMEOUT_MS: ${SCENARIO_LONG_POLL_TIMEOUT_MS:-20000}
+      ELECTRIC_SSE_TIMEOUT_MS: ${SCENARIO_SSE_TIMEOUT_MS:-60000}
+      ELECTRIC_FEATURE_FLAGS: ${SCENARIO_FEATURE_FLAGS:-}
       CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN: "true"
     ports:
       - "127.0.0.1:${COMPARE_PORT:-43200}:3000"

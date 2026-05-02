@@ -1,6 +1,6 @@
 # E2E Harness
 
-This directory contains a small but extensible end-to-end protocol comparison harness for PulseSync.
+This directory contains a small but extensible end-to-end protocol comparison harness for postgres-sync-go.
 
 It is designed for two workflows:
 
@@ -18,28 +18,32 @@ It is designed for two workflows:
 - `start-both.sh`
   Starts both sync services side by side for interactive debugging.
 - `start-both-docker.sh`
-  Starts dockerized Postgres, PulseSync, and the comparison service, then streams container logs.
+  Starts dockerized Postgres, postgres-sync-go, and the comparison service, then streams container logs.
 - `compare.sh`
-  Runs the seeded scenarios against PulseSync and the comparison service one by one, then diffs normalized outputs.
+  Runs the seeded scenarios against postgres-sync-go and the comparison service one by one, then diffs normalized outputs.
 - `compare-docker.sh`
   Runs the same compare flow against Docker containers instead of host processes.
-- `validate-pulsesync-docker.sh`
-  Runs PulseSync-only lifecycle validation for disk restart continuity, corrupt persisted-shape recovery, and reconnect health transitions.
-- `cmd/pulsediff`
+- `validate-postgres-sync-go-docker.sh`
+  Runs postgres-sync-go-only lifecycle validation for disk restart continuity, corrupt persisted-shape recovery, and reconnect health transitions.
+- `shadow-client-docker.sh`
+  Runs an unchanged compatible TypeScript client against dockerized postgres-sync-go and asserts client-observed shape state plus dependent subquery stream events.
+- `shadow-client.mjs`
+  Node runner used by `shadow-client-docker.sh`.
+- `cmd/syncdiff`
   Small helper used to normalize HTTP headers and bodies before diffing.
 - `docker-compose.yml`
-  Containerized side-by-side stack for Postgres, PulseSync, and the comparison service.
+  Containerized side-by-side stack for Postgres, postgres-sync-go, and the comparison service.
 
 ## Default Ports
 
 - Host-run harness defaults:
   - Postgres: `54321`
-  - PulseSync: `3100`
+  - postgres-sync-go: `3100`
   - Comparison service: `3200`
 - Dockerized harness defaults:
   - auto-selected free host ports in high one-off ranges
   - Postgres range: `45432-45532`
-  - PulseSync range: `43100-43199`
+  - postgres-sync-go range: `43100-43199`
   - Comparison service range: `43200-43299`
 
 ## Requirements
@@ -56,8 +60,23 @@ For the Dockerized E2E path:
 - `go`
 - `curl`
 - `psql`
+- `node`
+- `npm` unless `SHADOW_CLIENT_IMPORT` or `SHADOW_CLIENT_DIR` points at an already-built client package
 
 `mix` is not required when you use `compare-docker.sh` or `start-both-docker.sh`.
+
+## Optional Comparison Source
+
+The protocol comparison scripts require a local comparison sync-service checkout. The directory is ignored by git and is optional for public users who only want to run postgres-sync-go tests.
+
+Set these when the comparison source is not at the default local path:
+
+```bash
+export COMPARE_SYNC_DIR=/path/to/sync-service
+export COMPARE_TELEMETRY_DIR=/path/to/comparison-telemetry
+```
+
+If the comparison source is unavailable, comparison scripts exit with code `77` and print a clear setup message. postgres-sync-go-only checks such as `./scripts/harness-check.sh` and `./test/e2e/validate-postgres-sync-go-docker.sh` do not require it.
 
 ## Quick Start
 
@@ -85,15 +104,23 @@ Run the Dockerized compare suite:
 ./test/e2e/compare-docker.sh
 ```
 
-Run the PulseSync lifecycle validator:
+Run the postgres-sync-go lifecycle validator:
 
 ```bash
-./test/e2e/validate-pulsesync-docker.sh
+./test/e2e/validate-postgres-sync-go-docker.sh
 ```
 
-The Docker scripts choose free host ports by default and print the selected ports before startup. You can still pin them explicitly with `DB_PORT`, `PULSE_PORT`, and `COMPARE_PORT`.
+Run the TypeScript shadow-client validator:
 
-The Docker compare runner rotates the PulseSync and comparison-service host ports per scenario inside those ranges so rapid container restarts do not contend with lingering Docker port allocations.
+```bash
+./test/e2e/shadow-client-docker.sh
+```
+
+By default, `shadow-client-docker.sh` installs `@electric-sql/client` into `test/e2e/_artifacts/.../shadow-client-package`. To use a local unchanged client checkout instead, set `SHADOW_CLIENT_DIR` to the package directory or `SHADOW_CLIENT_IMPORT` to a built ESM entrypoint.
+
+The Docker scripts choose free host ports by default and print the selected ports before startup. You can still pin them explicitly with `DB_PORT`, `SYNC_GO_PORT`, and `COMPARE_PORT`.
+
+The Docker compare runner rotates the postgres-sync-go and comparison-service host ports per scenario inside those ranges so rapid container restarts do not contend with lingering Docker port allocations.
 
 If you already have a suitable Postgres instance running at `DATABASE_URL`, skip the Docker startup step:
 
@@ -136,15 +163,25 @@ test/e2e/_artifacts/<timestamp>/
 - `partition_offset_now_then_insert`
 - `partition_child_offset_now_then_insert`
 
-## Current PulseSync Validation Scenarios
+## Current postgres-sync-go Validation Scenarios
 
 - `disk_restart_continuity`
 - `disk_corrupt_shape_recovery`
 - `reconnect_health_and_continuation`
 
+## Current Shadow-Client Scenarios
+
+- `snapshot`
+- `filtered_snapshot`
+- `columns_snapshot`
+- `live_longpoll_insert`
+- `live_sse_update`
+- `subquery_move_in_out` through `ShapeStream` messages
+- `partition_root_live_insert`
+
 ## Notes
 
-- The compare runner executes PulseSync and the comparison service one by one, not simultaneously. That makes the DB state deterministic across both runs.
+- The compare runner executes postgres-sync-go and the comparison service one by one, not simultaneously. That makes the DB state deterministic across both runs.
 - The side-by-side runner exists separately for manual inspection and debugging.
 - The Docker compare runner keeps Postgres and both sync services in containers but still uses host `curl`, `psql`, and the Go normalizer helper.
 - The Docker scripts also generate a unique Compose project name by default so they do not trample another long-running stack from the same repo checkout.
@@ -160,3 +197,4 @@ The harness is intentionally small today, but it is structured to grow into a fu
 - shape deletion scenarios
 - a broader matrix for replica modes and column projections
 - broader disk corruption and recovery matrices
+- longer-running shadow-client runs with reconnect and restart cycles

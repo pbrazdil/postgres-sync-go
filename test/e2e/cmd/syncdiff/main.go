@@ -45,8 +45,8 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  pulsediff normalize-http --headers <path> --body <path>")
-	fmt.Fprintln(os.Stderr, "  pulsediff extract-header --headers <path> --name <header>")
+	fmt.Fprintln(os.Stderr, "  syncdiff normalize-http --headers <path> --body <path>")
+	fmt.Fprintln(os.Stderr, "  syncdiff extract-header --headers <path> --name <header>")
 }
 
 func runNormalizeHTTP(args []string) error {
