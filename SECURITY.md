@@ -6,7 +6,7 @@
 
 | Version | Supported |
 | --- | --- |
-| `v0.1.0-preview.2` | yes |
+| `v0.1.0-preview.3` | yes |
 
 ## Reporting A Vulnerability
 

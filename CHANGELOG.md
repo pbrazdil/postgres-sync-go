@@ -2,6 +2,15 @@
 
 All notable user-facing changes should be recorded here.
 
+## v0.1.0-preview.3 - 2026-05-02
+
+Preview update focused on parity coverage, shadow-client validation, and runtime recovery hardening.
+
+- Expanded dependent-shape differential coverage for nested, negated, and multi-hop subquery cases.
+- Broadened the protocol parity matrix for column live updates, replica modes, handle rotation, cache/ETag behavior, SSE resume, and overload paths.
+- Extended unchanged TypeScript shadow-client validation with reconnect, process restart, disk continuity, invalidation/refetch, and mixed concurrent Shape scenarios.
+- Added runtime hardening for WAL feedback, persistent slot-loss recovery, schema-change invalidation, disk chunk compaction, and richer replication/storage/admission metrics.
+
 ## v0.1.0-preview.2 - 2026-05-02
 
 Preview update focused on upstream parity and operational hardening.
